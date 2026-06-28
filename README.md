@@ -5,8 +5,8 @@ Streamlit prototype for the project idea in `Project_Ideation.md`.
 ## What It Does
 
 - Searches the Singapore MOH fee benchmark workbook at `data/feebenchmarks.xlsx`.
-- Uses a local advanced RAG retriever in `benchmark_rag.py` with BM25-style scoring, phrase/code boosts, sheet intent boosts, fuzzy matching, and result diversification.
-- Runs a sequential agent workflow: orchestrator, medical specialist, benchmark analyst, evaluator.
+- Uses a local advanced RAG retriever in `benchmark_rag.py`, structured around course RAG techniques: multi-query retrieval, fetch-more-than-k retrieval, score thresholding, MMR-style result diversification, phrase/code boosts, field-aware reranking, and query expansion.
+- Runs a course-style multi-agent workflow in `multi_agent_workflow.py`: agents have role/goal/backstory, tasks have descriptions/expected outputs, and execution follows a sequential crew pattern.
 - Supports BYO API keys for OpenAI, Gemini, Claude, and OpenAI-compatible chat completion endpoints.
 - Keeps API keys in Streamlit session memory only. They are not written to project files.
 
@@ -54,7 +54,7 @@ streamlit run app.py
 
 ## CrewAI Option
 
-The current app uses a lightweight CrewAI-style workflow in plain Python so it is easy to deploy.
+The current app uses a lightweight CrewAI-style workflow in plain Python so it is easy to deploy on Streamlit Community Cloud.
 
 CrewAI can be added after the base app is working:
 
@@ -63,6 +63,12 @@ pip install -r requirements-crewai.txt
 ```
 
 CrewAI's current docs require Python `>=3.10 and <3.14`, so use Python 3.12 rather than the local Python 3.14 interpreter.
+
+## Course Material Mapping
+
+- `benchmark_rag.py`: mirrors the RAG notebook ideas of retriever pipelines, multi-query retrieval, retrieving more context than the final `k`, score thresholds, MMR, and reranking.
+- `multi_agent_workflow.py`: mirrors the CrewAI notebook structure of `Agent`, `Task`, and `Crew` by defining agent specs, task specs, and a sequential workflow.
+- `app.py`: keeps the Streamlit UI layer separate from retrieval and multi-agent orchestration.
 
 ## Data
 

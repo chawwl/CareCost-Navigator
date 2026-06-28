@@ -12,6 +12,9 @@ import pandas as pd
 
 
 HEADER_HINTS = ("tosp", "description", "lower", "upper", "ward type", "drg", "ccs", "icd", "diagnosis")
+FETCH_K_FACTOR = 5
+MMR_LAMBDA = 0.72
+MIN_RETRIEVAL_SCORE = 0.5
 
 QUERY_EXPANSIONS = {
     "cost": ("fee", "fees", "bill", "benchmark", "lower", "upper"),
@@ -58,11 +61,14 @@ GENERIC_QUERY_TERMS = {
     "fee",
     "fees",
     "hospital",
+    "lower",
     "medical",
     "price",
     "procedure",
+    "stay",
     "surgery",
     "surgical",
+    "upper",
 }
 
 
@@ -113,24 +119,35 @@ def build_benchmark_index(records: list[BenchmarkRecord]) -> BenchmarkIndex:
 
 
 def search_benchmark_records(index: BenchmarkIndex, query: str, mode: str, limit: int = 10) -> list[tuple[BenchmarkRecord, float]]:
-    raw_terms = tokenize(query)
-    query_terms = expand_query_terms(raw_terms)
-    specific_terms = expand_query_terms([term for term in raw_terms if term not in GENERIC_QUERY_TERMS])
-    if not query_terms:
-        return []
+    # Mirrors the course RAG notebook's MultiQueryRetriever idea, but deterministically
+    # to avoid needing another LLM call before retrieval.
+    original_terms = tokenize(query)
+    original_specific_terms = expand_query_terms([term for term in original_terms if term not in GENERIC_QUERY_TERMS])
+    query_variants = build_multi_query_variants(query, mode)
+    candidate_scores: dict[tuple[str, int], tuple[BenchmarkRecord, float]] = {}
 
-    intents = infer_query_intents(query, mode)
-    query_phrases = extract_query_phrases(query)
-    query_codes = extract_codes(query)
+    for variant in query_variants:
+        raw_terms = tokenize(variant)
+        query_terms = expand_query_terms(raw_terms)
+        specific_terms = original_specific_terms or expand_query_terms([term for term in raw_terms if term not in GENERIC_QUERY_TERMS])
+        if not query_terms:
+            continue
 
-    candidates: list[tuple[BenchmarkRecord, float]] = []
-    for record in index.records:
-        score = hybrid_score(record, index, query_terms, specific_terms, query_phrases, query_codes, intents)
-        if score > 0:
-            candidates.append((record, score))
+        intents = infer_query_intents(variant, mode)
+        query_phrases = extract_query_phrases(variant)
+        query_codes = extract_codes(variant)
 
-    candidates.sort(key=lambda item: item[1], reverse=True)
-    return diversify_results(candidates[: max(limit * 5, limit)], limit)
+        for record in index.records:
+            score = hybrid_score(record, index, query_terms, specific_terms, query_phrases, query_codes, intents)
+            if score < MIN_RETRIEVAL_SCORE:
+                continue
+            key = (record.sheet, record.row_number)
+            if key not in candidate_scores or score > candidate_scores[key][1]:
+                candidate_scores[key] = (record, score)
+
+    candidates = sorted(candidate_scores.values(), key=lambda item: item[1], reverse=True)
+    fetch_k = max(limit * FETCH_K_FACTOR, limit)
+    return mmr_select(candidates[:fetch_k], limit)
 
 
 def hybrid_score(
@@ -157,13 +174,14 @@ def hybrid_score(
     code = code_score(record.searchable_text, query_codes)
     sheet = sheet_intent_boost(record.sheet, intents)
     field = field_boost(record, query_terms)
+    amount = amount_boost(record, intents)
     specificity = specific_term_score(record.searchable_text, specific_terms)
-    return (bm25 * 1.0) + (phrase * 2.5) + (code * 8.0) + (fuzzy * 1.4) + sheet + field + (specificity * 3.0)
+    return (bm25 * 1.0) + (phrase * 2.5) + (code * 8.0) + (fuzzy * 1.4) + sheet + field + amount + (specificity * 3.0)
 
 
 def has_specific_match(text: str, specific_terms: list[str], query_codes: list[str]) -> bool:
-    if any(code in text.upper() for code in query_codes):
-        return True
+    if query_codes:
+        return any(code in text.upper() for code in query_codes)
     return any(term in text for term in specific_terms)
 
 
@@ -246,21 +264,70 @@ def field_boost(record: BenchmarkRecord, query_terms: list[str]) -> float:
     return min(boost, 3.0)
 
 
-def diversify_results(candidates: list[tuple[BenchmarkRecord, float]], limit: int) -> list[tuple[BenchmarkRecord, float]]:
+def amount_boost(record: BenchmarkRecord, intents: set[str]) -> float:
+    if not ({"hospital_fee", "doctor_fee", "inpatient"} & intents):
+        return 0.0
+    lower, upper = estimate_amounts(record)
+    return 2.0 if lower is not None and upper is not None else 0.0
+
+
+def mmr_select(candidates: list[tuple[BenchmarkRecord, float]], limit: int) -> list[tuple[BenchmarkRecord, float]]:
+    """Maximum Marginal Relevance-style selection from the Week 4 RAG notebook."""
     selected: list[tuple[BenchmarkRecord, float]] = []
-    seen_keys: set[tuple[str, str]] = set()
-    for record, score in candidates:
-        signature = (
-            record.sheet,
-            first_matching_field(record, ("tosp", "drg", "ccs", "description", "note"))[:120].lower(),
-        )
-        if signature in seen_keys and len(selected) >= max(3, limit // 2):
+    remaining = candidates[:]
+    while remaining and len(selected) < limit:
+        if not selected:
+            record, relevance = remaining.pop(0)
+            selected.append((record, round(relevance, 3)))
             continue
-        seen_keys.add(signature)
-        selected.append((record, round(score, 3)))
-        if len(selected) >= limit:
-            break
+        best_index = 0
+        best_score = float("-inf")
+        for idx, (record, relevance) in enumerate(remaining):
+            diversity_penalty = max(token_jaccard(record, chosen) for chosen, _ in selected)
+            mmr_score = (MMR_LAMBDA * relevance) - ((1 - MMR_LAMBDA) * diversity_penalty)
+            if mmr_score > best_score:
+                best_index = idx
+                best_score = mmr_score
+        record, relevance = remaining.pop(best_index)
+        selected.append((record, round(relevance, 3)))
     return selected
+
+
+def token_jaccard(left: BenchmarkRecord, right: BenchmarkRecord) -> float:
+    left_tokens = set(left.tokens)
+    right_tokens = set(right.tokens)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def build_multi_query_variants(query: str, mode: str) -> list[str]:
+    variants = [
+        query,
+        f"{query} {mode}",
+    ]
+    codes = extract_codes(query)
+    if codes:
+        variants.extend(codes)
+
+    intent = infer_query_intents(query, mode)
+    if "hospital_fee" in intent:
+        variants.append(f"{query} hospital fee lower upper average length of stay")
+    if "doctor_fee" in intent:
+        variants.append(f"{query} surgeon anaesthetist doctor fee lower upper")
+    if "medical_condition" in intent:
+        variants.append(f"{query} DRG CCS ICD diagnosis medical condition")
+    if "surgical" in intent:
+        variants.append(f"{query} TOSP procedure description surgical")
+
+    deduped = []
+    seen = set()
+    for variant in variants:
+        normalized = clean_text(variant).lower()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            deduped.append(variant)
+    return deduped
 
 
 def build_context(matches: list[tuple[BenchmarkRecord, float]]) -> str:
