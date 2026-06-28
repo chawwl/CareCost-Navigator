@@ -5,6 +5,7 @@ Streamlit prototype for the project idea in `Project_Ideation.md`.
 ## What It Does
 
 - Searches the Singapore MOH fee benchmark workbook at `data/feebenchmarks.xlsx`.
+- Uses a local advanced RAG retriever in `benchmark_rag.py` with BM25-style scoring, phrase/code boosts, sheet intent boosts, fuzzy matching, and result diversification.
 - Runs a sequential agent workflow: orchestrator, medical specialist, benchmark analyst, evaluator.
 - Supports BYO API keys for OpenAI, Gemini, Claude, and OpenAI-compatible chat completion endpoints.
 - Keeps API keys in Streamlit session memory only. They are not written to project files.

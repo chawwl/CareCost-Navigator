@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +9,17 @@ import pandas as pd
 from openai import OpenAI
 import requests
 import streamlit as st
+
+from benchmark_rag import (
+    BenchmarkIndex,
+    BenchmarkRecord,
+    build_benchmark_index,
+    build_context,
+    estimate_amounts,
+    first_matching_field,
+    load_benchmark_records,
+    search_benchmark_records,
+)
 
 
 APP_TITLE = "CareCost Navigator"
@@ -30,21 +39,6 @@ PROVIDER_ENV_KEYS = {
     "Claude": "ANTHROPIC_API_KEY",
     "OpenAI-compatible": "GOVTECH_PLATFORM_API_KEY",
 }
-
-
-@dataclass
-class BenchmarkRecord:
-    sheet: str
-    row_number: int
-    fields: dict[str, str]
-    searchable_text: str
-
-    def as_context(self) -> dict[str, Any]:
-        return {
-            "sheet": self.sheet,
-            "row_number": self.row_number,
-            "fields": self.fields,
-        }
 
 
 class LLMClient:
@@ -147,129 +141,16 @@ def resolve_api_key(provider: str, typed_key: str) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def load_benchmark_records(path: str) -> list[BenchmarkRecord]:
-    workbook = pd.read_excel(path, sheet_name=None, header=None, dtype=str)
-    records: list[BenchmarkRecord] = []
-    for sheet_name, frame in workbook.items():
-        frame = frame.fillna("")
-        header_index = find_header_row(frame)
-        if header_index is None:
-            records.extend(load_note_records(sheet_name, frame))
-        else:
-            records.extend(load_tabular_records(sheet_name, frame, header_index))
-    return records
-
-
-def find_header_row(frame: pd.DataFrame) -> int | None:
-    hints = ("tosp", "description", "lower", "upper", "ward type", "drg", "ccs", "icd", "diagnosis")
-    best_index: int | None = None
-    best_score = 0
-    for idx, row in frame.iterrows():
-        text_cells = [str(cell).strip().lower() for cell in row.tolist() if str(cell).strip()]
-        score = sum(any(hint in cell for cell in text_cells) for hint in hints)
-        if score > best_score:
-            best_index = int(idx)
-            best_score = score
-    return best_index if best_score >= 2 else None
-
-
-def load_note_records(sheet_name: str, frame: pd.DataFrame) -> list[BenchmarkRecord]:
-    records: list[BenchmarkRecord] = []
-    for idx, row in frame.iterrows():
-        text = " ".join(str(cell).strip() for cell in row.tolist() if str(cell).strip())
-        if len(text) < 20:
-            continue
-        records.append(
-            BenchmarkRecord(
-                sheet=sheet_name,
-                row_number=int(idx) + 1,
-                fields={"note": clean_text(text)},
-                searchable_text=clean_text(f"{sheet_name} {text}").lower(),
-            )
-        )
-    return records
-
-
-def load_tabular_records(sheet_name: str, frame: pd.DataFrame, header_index: int) -> list[BenchmarkRecord]:
-    headers = make_headers(frame.iloc[header_index].tolist())
-    records: list[BenchmarkRecord] = []
-    for idx, row in frame.iloc[header_index + 1 :].iterrows():
-        values = [clean_text(str(cell)) for cell in row.tolist()]
-        fields = {
-            headers[col_index]: value
-            for col_index, value in enumerate(values)
-            if col_index < len(headers) and value
-        }
-        if len(fields) < 2:
-            continue
-        row_text = " ".join(fields.values())
-        records.append(
-            BenchmarkRecord(
-                sheet=sheet_name,
-                row_number=int(idx) + 1,
-                fields=fields,
-                searchable_text=clean_text(f"{sheet_name} {row_text}").lower(),
-            )
-        )
-    return records
-
-
-def make_headers(values: list[Any]) -> list[str]:
-    headers: list[str] = []
-    seen: dict[str, int] = {}
-    for idx, value in enumerate(values):
-        header = clean_text(str(value)).lower()
-        header = re.sub(r"[^a-z0-9]+", "_", header).strip("_")
-        if not header:
-            header = f"column_{idx + 1}"
-        seen[header] = seen.get(header, 0) + 1
-        if seen[header] > 1:
-            header = f"{header}_{seen[header]}"
-        headers.append(header)
-    return headers
-
-
-def clean_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value.replace("\xa0", " ")).strip()
-
-
-def search_records(records: list[BenchmarkRecord], query: str, limit: int = 10) -> list[tuple[BenchmarkRecord, int]]:
-    terms = [term for term in re.split(r"[^a-zA-Z0-9]+", query.lower()) if len(term) > 2]
-    if not terms:
-        return []
-    scored: list[tuple[BenchmarkRecord, int]] = []
-    for record in records:
-        score = 0
-        for term in terms:
-            if term in record.searchable_text:
-                score += 1
-            if re.search(rf"\b{re.escape(term)}\b", record.searchable_text):
-                score += 2
-        if score:
-            scored.append((record, score))
-    return sorted(scored, key=lambda item: item[1], reverse=True)[:limit]
-
-
-def estimate_amounts(record: BenchmarkRecord) -> tuple[int | None, int | None]:
-    numbers: list[int] = []
-    for key, value in record.fields.items():
-        if any(token in key for token in ("lower", "upper", "fee", "bound", "cost")):
-            numbers.extend(int(num.replace(",", "")) for num in re.findall(r"\d[\d,]*", value))
-    if not numbers:
-        return None, None
-    return min(numbers), max(numbers)
-
-
-def build_context(matches: list[tuple[BenchmarkRecord, int]]) -> str:
-    rows = [record.as_context() | {"match_score": score} for record, score in matches]
-    return json.dumps(rows, indent=2, ensure_ascii=False)
+def load_benchmark_index(path: str) -> BenchmarkIndex:
+    records = load_benchmark_records(path)
+    return build_benchmark_index(records)
 
 
 def run_agent_workflow(
     client: LLMClient,
     mode: str,
     question: str,
-    matches: list[tuple[BenchmarkRecord, int]],
+    matches: list[tuple[BenchmarkRecord, float]],
 ) -> tuple[str, list[tuple[str, str]]]:
     context = build_context(matches)
     base_system = """You are CareCost Navigator, an educational Singapore healthcare assistant.
@@ -315,7 +196,7 @@ Mention that actual costs vary by hospital, subsidy status, ward class, complica
     return final, steps
 
 
-def render_match_table(matches: list[tuple[BenchmarkRecord, int]]) -> None:
+def render_match_table(matches: list[tuple[BenchmarkRecord, float]]) -> None:
     if not matches:
         st.info("No benchmark rows matched this query yet.")
         return
@@ -333,14 +214,6 @@ def render_match_table(matches: list[tuple[BenchmarkRecord, int]]) -> None:
             }
         )
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-
-
-def first_matching_field(record: BenchmarkRecord, names: tuple[str, ...]) -> str:
-    for name in names:
-        for key, value in record.fields.items():
-            if name in key and value:
-                return value
-    return next(iter(record.fields.values()), "")
 
 
 def main() -> None:
@@ -375,8 +248,8 @@ def main() -> None:
         st.error(f"Missing workbook: {DATA_PATH}")
         return
 
-    records = load_benchmark_records(str(DATA_PATH))
-    st.success(f"Loaded {len(records):,} searchable rows/notes from `{DATA_PATH}`.")
+    benchmark_index = load_benchmark_index(str(DATA_PATH))
+    st.success(f"Loaded {len(benchmark_index.records):,} searchable rows/notes from `{DATA_PATH}`.")
 
     mode = st.radio(
         "Workflow",
@@ -393,7 +266,7 @@ def main() -> None:
         st.session_state.latest_answer = ""
 
     if question:
-        matches = search_records(records, question)
+        matches = search_benchmark_records(benchmark_index, question, mode)
         st.session_state.last_matches = matches
         client = LLMClient(provider=provider, api_key=api_key, model=model, base_url=base_url)
         with st.spinner("Running orchestrator, specialist, benchmark analyst, and evaluator..."):
