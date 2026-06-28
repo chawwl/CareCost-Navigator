@@ -28,7 +28,9 @@ client = OpenAI(
 )
 ```
 
-The app automatically calls `{base_url}/chat/completions`.
+The app uses the OpenAI Python SDK with this `base_url`, matching the snippet above.
+
+If this works locally but returns an HTML `403 Forbidden` page on Streamlit Community Cloud, the request is likely being blocked before it reaches the model API, for example by network/IP allowlisting or an upstream web application firewall. In that case, keep OpenAI as the cloud demo provider or deploy this app on an environment allowed by the GovTech API.
 
 For local development, you can also set:
 

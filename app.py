@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from openai import OpenAI
 import requests
 import streamlit as st
 
@@ -60,32 +61,26 @@ class LLMClient:
             return self._gemini(system, user)
         if self.provider == "Claude":
             return self._anthropic(system, user)
-        endpoint = "https://api.openai.com/v1/chat/completions"
+        return self._openai_sdk(system, user)
+
+    def _openai_sdk(self, system: str, user: str) -> str:
+        kwargs: dict[str, str] = {"api_key": self.api_key}
         if self.provider == "OpenAI-compatible":
             if not self.base_url:
                 raise ValueError("Enter the OpenAI-compatible base URL or chat completions endpoint.")
-            endpoint = normalize_openai_compatible_endpoint(self.base_url)
-        return self._openai_compatible(endpoint, system, user)
+            kwargs["base_url"] = normalize_openai_compatible_base_url(self.base_url)
 
-    def _openai_compatible(self, endpoint: str, system: str, user: str) -> str:
-        response = requests.post(
-            endpoint,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0.2,
-            },
+        client = OpenAI(**kwargs)
+        response = client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.2,
             timeout=90,
         )
-        payload = parse_json_response(response)
-        return payload.get("choices", [{}])[0].get("message", {}).get("content", "")
+        return response.choices[0].message.content or ""
 
     def _gemini(self, system: str, user: str) -> str:
         endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
@@ -136,12 +131,12 @@ def parse_json_response(response: requests.Response) -> dict[str, Any]:
     return payload
 
 
-def normalize_openai_compatible_endpoint(base_url: str) -> str:
+def normalize_openai_compatible_base_url(base_url: str) -> str:
     """Accept either an OpenAI SDK base_url or a full chat completions endpoint."""
     url = base_url.strip().rstrip("/")
     if url.endswith("/chat/completions"):
-        return url
-    return f"{url}/chat/completions"
+        return url[: -len("/chat/completions")]
+    return url
 
 
 def resolve_api_key(provider: str, typed_key: str) -> str:
@@ -368,7 +363,7 @@ def main() -> None:
             base_url = st.text_input(
                 "Base URL or chat completions endpoint",
                 placeholder="https://api-public.ai.tech.gov.sg/platform/models",
-                help="For GovTech AI Platform, use the same base_url you would pass to OpenAI(...). The app will append /chat/completions automatically.",
+                help="For GovTech AI Platform, use the same base_url you would pass to OpenAI(...).",
             )
         st.divider()
         st.header("Data")
