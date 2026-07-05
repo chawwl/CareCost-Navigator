@@ -9,12 +9,22 @@ from difflib import SequenceMatcher
 from typing import Any
 
 import pandas as pd
+from langchain_community.retrievers import BM25Retriever
+from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
+from langchain_core.vectorstores import InMemoryVectorStore
+from langchain_openai import OpenAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 HEADER_HINTS = ("tosp", "description", "lower", "upper", "ward type", "drg", "ccs", "icd", "diagnosis")
 FETCH_K_FACTOR = 5
+MIN_RETRIEVAL_SCORE = 0.15
 MMR_LAMBDA = 0.72
-MIN_RETRIEVAL_SCORE = 0.5
+RRF_K = 60
+ROW_CHUNK_SIZE = 900
+ROW_CHUNK_OVERLAP = 90
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 
 QUERY_EXPANSIONS = {
     "cost": ("fee", "fees", "bill", "benchmark", "lower", "upper"),
@@ -42,7 +52,6 @@ STOPWORDS = {
     "for",
     "from",
     "how",
-    "into",
     "much",
     "need",
     "the",
@@ -80,6 +89,10 @@ class BenchmarkRecord:
     searchable_text: str
     tokens: tuple[str, ...]
 
+    @property
+    def record_id(self) -> str:
+        return make_record_id(self.sheet, self.row_number)
+
     def as_context(self) -> dict[str, Any]:
         return {
             "sheet": self.sheet,
@@ -93,6 +106,27 @@ class BenchmarkIndex:
     records: list[BenchmarkRecord]
     document_frequency: dict[str, int]
     average_length: float
+    documents: list[Document]
+    bm25_retriever: BM25Retriever
+    vector_store: InMemoryVectorStore | None = None
+    retrieval_backend: str = "LangChain BM25"
+    retrieval_note: str = ""
+
+
+@dataclass
+class RetrievalCandidate:
+    record: BenchmarkRecord
+    score: float = 0.0
+    best_chunk: str = ""
+    ranks: list[int] | None = None
+
+    def add(self, score: float, chunk: str, rank: int) -> None:
+        self.score += score
+        if not self.best_chunk or len(chunk) > len(self.best_chunk):
+            self.best_chunk = chunk
+        if self.ranks is None:
+            self.ranks = []
+        self.ranks.append(rank)
 
 
 def load_benchmark_records(path: str) -> list[BenchmarkRecord]:
@@ -108,23 +142,99 @@ def load_benchmark_records(path: str) -> list[BenchmarkRecord]:
     return records
 
 
-def build_benchmark_index(records: list[BenchmarkRecord]) -> BenchmarkIndex:
+def build_benchmark_index(
+    records: list[BenchmarkRecord],
+    *,
+    provider: str = "",
+    api_key: str = "",
+    base_url: str = "",
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+) -> BenchmarkIndex:
     document_frequency: Counter[str] = Counter()
     total_length = 0
     for record in records:
         document_frequency.update(set(record.tokens))
         total_length += len(record.tokens)
-    average_length = total_length / max(len(records), 1)
-    return BenchmarkIndex(records=records, document_frequency=dict(document_frequency), average_length=average_length)
+
+    documents = split_benchmark_documents(records)
+    bm25_retriever = BM25Retriever.from_documents(
+        documents,
+        k=max(20, min(len(documents), 50)),
+        preprocess_func=tokenize,
+    )
+
+    vector_store: InMemoryVectorStore | None = None
+    retrieval_backend = "LangChain BM25"
+    retrieval_note = ""
+    embeddings = make_embedding_model(provider, api_key, base_url, embedding_model)
+    if embeddings is not None:
+        try:
+            vector_store = InMemoryVectorStore(embeddings)
+            vector_store.add_documents(documents, ids=[doc.metadata["chunk_id"] for doc in documents])
+            retrieval_backend = f"LangChain BM25 + InMemoryVectorStore ({embedding_model})"
+        except Exception as exc:
+            retrieval_note = f"Semantic vector index was skipped: {exc}"
+
+    return BenchmarkIndex(
+        records=records,
+        document_frequency=dict(document_frequency),
+        average_length=total_length / max(len(records), 1),
+        documents=documents,
+        bm25_retriever=bm25_retriever,
+        vector_store=vector_store,
+        retrieval_backend=retrieval_backend,
+        retrieval_note=retrieval_note,
+    )
+
+
+def make_embedding_model(provider: str, api_key: str, base_url: str, embedding_model: str) -> Embeddings | None:
+    if not api_key or provider not in {"OpenAI", "OpenAI-compatible"}:
+        return None
+
+    kwargs: dict[str, str] = {"model": embedding_model or DEFAULT_EMBEDDING_MODEL, "api_key": api_key}
+    if provider == "OpenAI-compatible" and base_url:
+        kwargs["base_url"] = normalize_openai_compatible_base_url(base_url)
+    return OpenAIEmbeddings(**kwargs)
+
+
+def split_benchmark_documents(records: list[BenchmarkRecord]) -> list[Document]:
+    row_documents = [record_to_document(record) for record in records]
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=ROW_CHUNK_SIZE,
+        chunk_overlap=ROW_CHUNK_OVERLAP,
+        separators=["\n\n", "\n", "; ", " | ", " ", ""],
+    )
+    chunks = splitter.split_documents(row_documents)
+    for chunk_number, chunk in enumerate(chunks):
+        chunk.metadata["chunk_id"] = f"{chunk.metadata['record_id']}::chunk-{chunk_number}"
+    return chunks
+
+
+def record_to_document(record: BenchmarkRecord) -> Document:
+    page_content = serialize_record(record)
+    return Document(
+        page_content=page_content,
+        metadata={
+            "record_id": record.record_id,
+            "sheet": record.sheet,
+            "row_number": record.row_number,
+            "fields_json": json.dumps(record.fields, ensure_ascii=False),
+        },
+    )
+
+
+def serialize_record(record: BenchmarkRecord) -> str:
+    field_text = "\n".join(f"{key}: {value}" for key, value in record.fields.items() if value)
+    return f"Sheet: {record.sheet}\nRow: {record.row_number}\n{field_text}"
 
 
 def search_benchmark_records(index: BenchmarkIndex, query: str, mode: str, limit: int = 10) -> list[tuple[BenchmarkRecord, float]]:
-    # Mirrors the course RAG notebook's MultiQueryRetriever idea, but deterministically
-    # to avoid needing another LLM call before retrieval.
+    query_variants = build_multi_query_variants(query, mode)
+    record_lookup = {record.record_id: record for record in index.records}
+    candidates: dict[str, RetrievalCandidate] = {}
+    fetch_k = max(limit * FETCH_K_FACTOR, limit)
     original_terms = tokenize(query)
     original_specific_terms = expand_query_terms([term for term in original_terms if term not in GENERIC_QUERY_TERMS])
-    query_variants = build_multi_query_variants(query, mode)
-    candidate_scores: dict[tuple[str, int], tuple[BenchmarkRecord, float]] = {}
 
     for variant in query_variants:
         raw_terms = tokenize(variant)
@@ -137,46 +247,147 @@ def search_benchmark_records(index: BenchmarkIndex, query: str, mode: str, limit
         query_phrases = extract_query_phrases(variant)
         query_codes = extract_codes(variant)
 
-        for record in index.records:
-            score = hybrid_score(record, index, query_terms, specific_terms, query_phrases, query_codes, intents)
-            if score < MIN_RETRIEVAL_SCORE:
-                continue
-            key = (record.sheet, record.row_number)
-            if key not in candidate_scores or score > candidate_scores[key][1]:
-                candidate_scores[key] = (record, score)
+        bm25_docs = index.bm25_retriever.invoke(variant)[:fetch_k]
+        merge_ranked_documents(
+            candidates,
+            record_lookup,
+            bm25_docs,
+            query_terms,
+            specific_terms,
+            query_phrases,
+            query_codes,
+            intents,
+            source_weight=0.9,
+        )
 
-    candidates = sorted(candidate_scores.values(), key=lambda item: item[1], reverse=True)
-    fetch_k = max(limit * FETCH_K_FACTOR, limit)
-    return mmr_select(candidates[:fetch_k], limit)
+        if index.vector_store is None:
+            continue
+
+        vector_docs_with_scores = index.vector_store.similarity_search_with_score(variant, k=fetch_k)
+        merge_scored_documents(
+            candidates,
+            record_lookup,
+            vector_docs_with_scores,
+            query_terms,
+            specific_terms,
+            query_phrases,
+            query_codes,
+            intents,
+            source_weight=1.25,
+        )
+
+    ranked = sorted(candidates.values(), key=lambda candidate: candidate.score, reverse=True)
+    filtered = [(candidate.record, candidate.score) for candidate in ranked if candidate.score >= MIN_RETRIEVAL_SCORE]
+    if not filtered and ranked:
+        filtered = [(candidate.record, candidate.score) for candidate in ranked[:limit]]
+    return mmr_select(filtered[: max(limit * FETCH_K_FACTOR, limit)], limit)
 
 
-def hybrid_score(
-    record: BenchmarkRecord,
-    index: BenchmarkIndex,
+def merge_ranked_documents(
+    candidates: dict[str, RetrievalCandidate],
+    record_lookup: dict[str, BenchmarkRecord],
+    documents: list[Document],
     query_terms: list[str],
     specific_terms: list[str],
     query_phrases: list[str],
     query_codes: list[str],
     intents: set[str],
+    *,
+    source_weight: float,
+) -> None:
+    for rank, document in enumerate(documents):
+        record = record_lookup.get(str(document.metadata.get("record_id", "")))
+        if record is None:
+            continue
+        score = retrieval_score(
+            record,
+            document.page_content,
+            query_terms,
+            specific_terms,
+            query_phrases,
+            query_codes,
+            intents,
+            source_weight * reciprocal_rank(rank),
+        )
+        if score <= 0:
+            continue
+        get_candidate(candidates, record).add(score, document.page_content, rank)
+
+
+def merge_scored_documents(
+    candidates: dict[str, RetrievalCandidate],
+    record_lookup: dict[str, BenchmarkRecord],
+    documents_with_scores: list[tuple[Document, float]],
+    query_terms: list[str],
+    specific_terms: list[str],
+    query_phrases: list[str],
+    query_codes: list[str],
+    intents: set[str],
+    *,
+    source_weight: float,
+) -> None:
+    for rank, (document, raw_score) in enumerate(documents_with_scores):
+        record = record_lookup.get(str(document.metadata.get("record_id", "")))
+        if record is None:
+            continue
+        vector_score = normalize_vector_score(raw_score)
+        score = retrieval_score(
+            record,
+            document.page_content,
+            query_terms,
+            specific_terms,
+            query_phrases,
+            query_codes,
+            intents,
+            source_weight * vector_score + (0.35 * reciprocal_rank(rank)),
+        )
+        if score <= 0:
+            continue
+        get_candidate(candidates, record).add(score, document.page_content, rank)
+
+
+def retrieval_score(
+    record: BenchmarkRecord,
+    chunk_text: str,
+    query_terms: list[str],
+    specific_terms: list[str],
+    query_phrases: list[str],
+    query_codes: list[str],
+    intents: set[str],
+    base_score: float,
 ) -> float:
-    if specific_terms and not has_specific_match(record.searchable_text, specific_terms, query_codes):
+    searchable_text = f"{record.searchable_text} {chunk_text.lower()}"
+    if specific_terms and not has_specific_match(searchable_text, specific_terms, query_codes):
         return 0.0
 
-    bm25 = bm25_score(record, index, query_terms)
-    if bm25 == 0:
-        fuzzy = fuzzy_score(record.searchable_text, query_terms)
-        if fuzzy < 0.55:
-            return 0
-    else:
-        fuzzy = fuzzy_score(record.searchable_text, query_terms)
-
-    phrase = phrase_score(record.searchable_text, query_phrases)
-    code = code_score(record.searchable_text, query_codes)
+    phrase = phrase_score(searchable_text, query_phrases)
+    code = code_score(searchable_text, query_codes)
+    fuzzy = fuzzy_score(searchable_text, query_terms)
     sheet = sheet_intent_boost(record.sheet, intents)
     field = field_boost(record, query_terms)
     amount = amount_boost(record, intents)
-    specificity = specific_term_score(record.searchable_text, specific_terms)
-    return (bm25 * 1.0) + (phrase * 2.5) + (code * 8.0) + (fuzzy * 1.4) + sheet + field + amount + (specificity * 3.0)
+    specificity = specific_term_score(searchable_text, specific_terms)
+    return base_score + (phrase * 0.8) + (code * 4.0) + (fuzzy * 0.5) + sheet + field + amount + specificity
+
+
+def get_candidate(candidates: dict[str, RetrievalCandidate], record: BenchmarkRecord) -> RetrievalCandidate:
+    if record.record_id not in candidates:
+        candidates[record.record_id] = RetrievalCandidate(record=record)
+    return candidates[record.record_id]
+
+
+def normalize_vector_score(score: float) -> float:
+    if math.isnan(score):
+        return 0.0
+    if 0 <= score <= 1:
+        return score
+    if score < 0:
+        return 0.0
+    return 1 / (1 + score)
+
+
+def reciprocal_rank(rank: int) -> float:
+    return 1 / (RRF_K + rank + 1)
 
 
 def has_specific_match(text: str, specific_terms: list[str], query_codes: list[str]) -> bool:
@@ -190,23 +401,6 @@ def specific_term_score(text: str, specific_terms: list[str]) -> float:
         return 0.0
     matched = sum(1 for term in specific_terms if term in text)
     return matched / len(specific_terms)
-
-
-def bm25_score(record: BenchmarkRecord, index: BenchmarkIndex, query_terms: list[str]) -> float:
-    k1 = 1.5
-    b = 0.75
-    counts = Counter(record.tokens)
-    score = 0.0
-    doc_len = max(len(record.tokens), 1)
-    for term in query_terms:
-        tf = counts.get(term, 0)
-        if tf == 0:
-            continue
-        df = index.document_frequency.get(term, 0)
-        idf = math.log(1 + ((len(index.records) - df + 0.5) / (df + 0.5)))
-        denominator = tf + k1 * (1 - b + b * (doc_len / max(index.average_length, 1)))
-        score += idf * ((tf * (k1 + 1)) / denominator)
-    return score
 
 
 def phrase_score(text: str, phrases: list[str]) -> float:
@@ -272,9 +466,8 @@ def amount_boost(record: BenchmarkRecord, intents: set[str]) -> float:
 
 
 def mmr_select(candidates: list[tuple[BenchmarkRecord, float]], limit: int) -> list[tuple[BenchmarkRecord, float]]:
-    """Maximum Marginal Relevance-style selection from the Week 4 RAG notebook."""
     selected: list[tuple[BenchmarkRecord, float]] = []
-    remaining = candidates[:]
+    remaining = sorted(candidates, key=lambda item: item[1], reverse=True)
     while remaining and len(selected) < limit:
         if not selected:
             record, relevance = remaining.pop(0)
@@ -465,3 +658,14 @@ def infer_query_intents(query: str, mode: str) -> set[str]:
     if not intents:
         intents.update({"hospital_fee", "doctor_fee", "medical_condition", "surgical"})
     return intents
+
+
+def make_record_id(sheet_name: str, row_number: int) -> str:
+    return f"{sheet_name}::{row_number}"
+
+
+def normalize_openai_compatible_base_url(base_url: str) -> str:
+    url = base_url.strip().rstrip("/")
+    if url.endswith("/chat/completions"):
+        return url[: -len("/chat/completions")]
+    return url

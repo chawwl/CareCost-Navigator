@@ -5,9 +5,10 @@ Streamlit prototype for the project idea in `Project_Ideation.md`.
 ## What It Does
 
 - Searches the Singapore MOH fee benchmark workbook at `data/feebenchmarks.xlsx`.
-- Uses a local advanced RAG retriever in `benchmark_rag.py`, RAG techniques: multi-query retrieval, fetch-more-than-k retrieval, score thresholding, MMR-style result diversification, phrase/code boosts, field-aware reranking, and query expansion.
+- Uses LangChain RAG utilities in `utils/benchmark_rag.py`: workbook rows are loaded as `Document` objects, split into chunks, indexed with BM25 and optionally an OpenAI/OpenAI-compatible in-memory vector store, then retrieved with multi-query expansion, fetch-more-than-k retrieval, score thresholding, MMR-style result diversification, phrase/code boosts, field-aware reranking, and row-level context assembly.
 - Runs a lightweight multi-agent workflow in `multi_agent_workflow.py`: agents have role/goal/backstory, tasks have descriptions/expected outputs, and execution follows a sequential crew pattern. With plans to add CrewAI framework
 - Supports BYO API keys for OpenAI, Gemini, Claude, and OpenAI-compatible chat completion endpoints.
+- Reuses the same OpenAI or OpenAI-compatible sidebar API key for semantic RAG embeddings when that provider is selected; otherwise BM25 retrieval remains available without an embedding call.
 - Keeps API keys in Streamlit session memory only. They are not written to project files.
 
 ## GovTech AI Platform
