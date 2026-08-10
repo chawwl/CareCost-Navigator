@@ -1,0 +1,72 @@
+[
+  {
+    "id": "moh-fee-benchmarks",
+    "title": "Hospital Bills and Fee Benchmarks",
+    "agency": "Ministry of Health Singapore",
+    "url": "https://www.moh.gov.sg/managing-expenses/bills-and-fee-benchmarks/hospital-bills-and-fee-benchmarks/",
+    "topics": [
+      "fee benchmark",
+      "hospital bill",
+      "doctor fee",
+      "surgeon",
+      "anaesthetist",
+      "inpatient attendance",
+      "private hospital",
+      "TOSP"
+    ],
+    "summary": "MOH fee benchmarks are reference ranges for routine and typical private-sector cases. Separate ranges may apply to hospital charges and doctors' professional fees, and the benchmarks do not apply to public hospitals.",
+    "guidance": [
+      "Ask the doctor or hospital for the TOSP code or provisional diagnosis and an itemised fee breakdown.",
+      "A benchmark is not a quote; complexity and the actual care delivered can change the final bill.",
+      "Hospital fee benchmarks and professional fee benchmarks cover different bill components."
+    ],
+    "last_reviewed": "2026-08-10"
+  },
+  {
+    "id": "moh-getting-medical-help",
+    "title": "Getting medical help",
+    "agency": "Ministry of Health Singapore",
+    "url": "https://www.moh.gov.sg/seeking-healthcare/getting-medical-help/",
+    "topics": [
+      "symptoms",
+      "medical help",
+      "general practitioner",
+      "polyclinic",
+      "emergency department",
+      "chest pain",
+      "breathing difficulty",
+      "bleeding",
+      "weakness"
+    ],
+    "summary": "MOH advises using community care such as a GP or polyclinic for mild-to-moderate symptoms and going to an Emergency Department when there are signs of a medical emergency.",
+    "guidance": [
+      "Emergency warning signs listed by MOH include sudden or severe pain, breathing difficulty, uncontrolled bleeding, sudden confusion, and sudden weakness or vision change.",
+      "A clinician should assess symptoms and decide whether tests, procedures, or referral are appropriate."
+    ],
+    "last_reviewed": "2026-08-10"
+  },
+  {
+    "id": "scdf-emergency-medical-services",
+    "title": "Emergency Medical Services",
+    "agency": "Singapore Civil Defence Force",
+    "url": "https://www.scdf.gov.sg/home/about-scdf/emergency-medical-services",
+    "topics": [
+      "995",
+      "ambulance",
+      "emergency",
+      "cardiac arrest",
+      "seizure",
+      "breathlessness",
+      "loss of consciousness",
+      "excessive bleeding",
+      "major trauma",
+      "stroke"
+    ],
+    "summary": "SCDF operates Singapore's 24-hour Emergency Medical Services. Call 995 for life-threatening emergencies such as cardiac arrest, seizures, breathlessness, loss of consciousness, excessive bleeding, major trauma, or stroke.",
+    "guidance": [
+      "Call 995 for a life-threatening emergency and follow the call-taker's instructions.",
+      "Describe the person's signs and symptoms briefly and provide the exact location."
+    ],
+    "last_reviewed": "2026-08-10"
+  }
+]

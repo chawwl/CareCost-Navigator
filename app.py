@@ -1,206 +1,69 @@
-from __future__ import annotations
-
 from pathlib import Path
 
-import pandas as pd
 import streamlit as st
 
-from utils.benchmark_rag import (
-    BenchmarkIndex,
-    BenchmarkRecord,
-    DEFAULT_EMBEDDING_MODEL,
-    build_benchmark_index,
-    estimate_amounts,
-    first_matching_field,
-    load_benchmark_records,
-    search_benchmark_records,
+from ui_components import APP_TITLE, DATA_PATH, require_access, workbook_summary
+
+
+st.set_page_config(page_title=APP_TITLE, page_icon="🏥", layout="wide")
+require_access()
+
+st.title(APP_TITLE)
+st.subheader("Understand possible care pathways and Singapore MOH fee benchmarks")
+st.write(
+    "A multi-page educational app that combines an agentic LLM workflow, curated official guidance, "
+    "and retrieval over the MOH fee benchmark workbook. Choose one of the two use cases below."
 )
-from multi_agent_workflow import (
-    AgentStep,
-    MODEL_DEFAULTS,
-    PROVIDER_ENV_KEYS,
-    LLMClient,
-    infer_workflow_mode,
-    resolve_api_key,
-    run_agent_workflow,
+st.warning(
+    "### **IMPORTANT NOTICE**\n\n"
+    "This web application is a prototype developed for **educational purposes only**. "
+    "The information provided here is **NOT intended for real-world usage** and should "
+    "not be relied upon for making any decisions, especially those related to financial, "
+    "legal, or healthcare matters.\n\n"
+    "* **LLM Inaccuracy:** Please be aware that the LLM may generate inaccurate or incorrect information.\n"
+    "* **User Responsibility:** You assume full responsibility for how you use any generated output.\n\n"
+    "Always consult with **qualified professionals** for accurate and personalised advice.",
+    icon="⚠️"
+)
+st.info("Use generic, non-identifying information only. This app is not medical advice and does not provide a bill quote.")
+
+left, right = st.columns(2)
+with left:
+    st.markdown("### 1 · Care Pathway Guide")
+    st.write(
+        "Describe a symptom, diagnosis, or procedure. The workflow identifies missing context, checks emergency "
+        "warning signs, consults curated official sources, and produces questions to discuss with a clinician."
+    )
+    st.page_link("pages/1_Care_Pathway_Guide.py", label="Open Care Pathway Guide", icon="🩺")
+with right:
+    st.markdown("### 2 · Fee Benchmark Explorer")
+    st.write(
+        "Enter a procedure or TOSP code and care setting. The workflow searches the MOH workbook, explains matched "
+        "reference ranges, and presents the evidence as a table and chart."
+    )
+    st.page_link("pages/2_Fee_Benchmark_Explorer.py", label="Open Fee Benchmark Explorer", icon="📊")
+
+st.divider()
+st.subheader("What is under the hood")
+if DATA_PATH.exists():
+    record_count, sheet_count = workbook_summary(str(DATA_PATH))
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Searchable benchmark records", f"{record_count:,}")
+    col2.metric("Workbook sections", f"{sheet_count:,}")
+    col3.metric("Curated official web sources", "3")
+else:
+    st.error(f"Missing workbook: {DATA_PATH}")
+
+st.write(
+    "The planner selects from a constrained tool allowlist; tools perform safety screening, official-source lookup, "
+    "fee retrieval, and missing-information checks. An answer composer is followed by a quality evaluator and at most "
+    "one revision."
 )
 
+about, method = st.columns(2)
+with about:
+    st.page_link("pages/3_About_Us.py", label="About Us", icon="ℹ️")
+with method:
+    st.page_link("pages/4_Methodology.py", label="Methodology and flowcharts", icon="🧭")
 
-APP_TITLE = "CareCost Navigator"
-DATA_PATH = Path("data/feebenchmarks.xlsx")
-MOH_SOURCE_URL = "https://www.moh.gov.sg/managing-expenses/bills-and-fee-benchmarks/hospital-bills-and-fee-benchmarks/"
-
-@st.cache_resource(show_spinner=False)
-def load_benchmark_index(
-    path: str,
-    provider: str,
-    api_key: str,
-    base_url: str,
-    embedding_model: str,
-) -> BenchmarkIndex:
-    records = load_benchmark_records(path)
-    return build_benchmark_index(
-        records,
-        provider=provider,
-        api_key=api_key,
-        base_url=base_url,
-        embedding_model=embedding_model,
-    )
-
-
-def render_match_table(matches: list[tuple[BenchmarkRecord, float]]) -> None:
-    if not matches:
-        st.info("No benchmark rows matched this query yet.")
-        return
-    rows = []
-    for record, score in matches:
-        lower, upper = estimate_amounts(record)
-        rows.append(
-            {
-                "score": score,
-                "sheet": record.sheet,
-                "row": record.row_number,
-                "description": first_matching_field(record, ("description", "drg_description", "ccs", "ward_type", "note")),
-                "lower_estimate": lower,
-                "upper_estimate": upper,
-            }
-        )
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-
-
-def initialize_session_state() -> None:
-    defaults = {
-        "agent_steps": [],
-        "last_matches": [],
-        "latest_answer": "",
-        "messages": [],
-        "follow_up_questions": [],
-        "inferred_mode": "Auto",
-    }
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
-
-
-def clear_conversation() -> None:
-    st.session_state.agent_steps = []
-    st.session_state.last_matches = []
-    st.session_state.latest_answer = ""
-    st.session_state.messages = []
-    st.session_state.follow_up_questions = []
-    st.session_state.inferred_mode = "Auto"
-
-
-def build_retrieval_query(messages: list[dict[str, str]], question: str) -> str:
-    user_turns = [message["content"] for message in messages if message.get("role") == "user"]
-    if not user_turns:
-        return question
-    return "\n".join([*user_turns[-3:], question])
-
-
-def render_chat_messages(messages: list[dict[str, str]]) -> None:
-    if not messages:
-        st.info("Ask a question to start.")
-        return
-    for message in messages:
-        with st.chat_message(message.get("role", "assistant")):
-            st.markdown(message.get("content", ""))
-
-
-def main() -> None:
-    st.set_page_config(page_title=APP_TITLE, layout="wide")
-    initialize_session_state()
-    st.title(APP_TITLE)
-    st.caption("A Streamlit prototype for condition-to-procedure guidance and Singapore MOH fee benchmark search.")
-
-    with st.sidebar:
-        st.header("Model")
-        provider = st.selectbox("Provider", list(MODEL_DEFAULTS), index=0)
-        model = st.text_input("Model", value=MODEL_DEFAULTS[provider])
-        api_key_input = st.text_input(
-            "API key",
-            type="password",
-            help=f"Kept only in Streamlit session memory; not written to disk. Leave blank to use {PROVIDER_ENV_KEYS[provider]} if it is set.",
-        )
-        api_key = resolve_api_key(provider, api_key_input)
-        base_url = ""
-        if provider == "OpenAI-compatible":
-            base_url = st.text_input(
-                "Base URL or chat completions endpoint",
-                placeholder="https://api-public.ai.tech.gov.sg/platform/models",
-                help="For GovTech AI Platform, use the same base_url you would pass to OpenAI(...).",
-            )
-        embedding_model = DEFAULT_EMBEDDING_MODEL
-        if provider in {"OpenAI", "OpenAI-compatible"}:
-            embedding_model = st.text_input("Embedding model", value=DEFAULT_EMBEDDING_MODEL)
-        st.divider()
-        st.header("Data")
-        st.write(f"Workbook: `{DATA_PATH}`")
-        st.link_button("MOH fee benchmarks source", MOH_SOURCE_URL)
-        st.divider()
-        if st.button("Clear chat"):
-            clear_conversation()
-
-    if not DATA_PATH.exists():
-        st.error(f"Missing workbook: {DATA_PATH}")
-        return
-
-    benchmark_index = load_benchmark_index(str(DATA_PATH), provider, api_key, base_url, embedding_model)
-    st.success(
-        f"Loaded {len(benchmark_index.records):,} searchable rows/notes "
-        f"and {len(benchmark_index.documents):,} RAG chunks from `{DATA_PATH}`."
-    )
-    st.caption(f"Retriever: {benchmark_index.retrieval_backend}")
-    if benchmark_index.retrieval_note:
-        st.warning(benchmark_index.retrieval_note)
-
-    question = st.chat_input("Describe symptoms, a diagnosis, procedure, ward type, or benchmark question...")
-
-    if question:
-        previous_messages = list(st.session_state.messages)
-        retrieval_query = build_retrieval_query(previous_messages, question)
-        mode = infer_workflow_mode(question, previous_messages)
-        matches = search_benchmark_records(benchmark_index, retrieval_query, mode)
-        st.session_state.last_matches = matches
-        client = LLMClient(provider=provider, api_key=api_key, model=model, base_url=base_url)
-        with st.spinner("Running the routed agent workflow..."):
-            try:
-                result = run_agent_workflow(client, mode, question, matches, previous_messages)
-                answer = result.answer
-                steps = result.steps
-                st.session_state.follow_up_questions = result.follow_up_questions
-                st.session_state.inferred_mode = result.inferred_mode
-            except Exception as exc:
-                answer = f"Model call failed: {exc}"
-                steps = [AgentStep("System", answer)]
-                st.session_state.follow_up_questions = []
-                st.session_state.inferred_mode = mode
-        st.session_state.messages.append({"role": "user", "content": question})
-        st.session_state.messages.append({"role": "assistant", "content": answer})
-        st.session_state.latest_answer = answer
-        st.session_state.agent_steps = steps
-
-    st.subheader("Chat")
-    render_chat_messages(st.session_state.messages)
-
-    with st.expander("Agent Trace", expanded=False):
-        if not st.session_state.agent_steps:
-            st.write("Ask a question to see the sequential agent workflow.")
-        else:
-            st.caption(f"Auto-routed workflow: {st.session_state.inferred_mode}")
-        for step in st.session_state.agent_steps:
-            st.markdown(f"**{step.name}**")
-            st.markdown(step.output)
-
-    with st.expander("Matched Benchmark Rows", expanded=False):
-        render_match_table(st.session_state.last_matches)
-
-    with st.expander("Safety and scope"):
-        st.write(
-            "This prototype is educational. It does not diagnose, prescribe treatment, or guarantee costs. "
-            "Clinical decisions should be discussed with a licensed medical professional."
-        )
-
-
-if __name__ == "__main__":
-    main()
+st.caption(f"Workbook available: {'yes' if Path(DATA_PATH).exists() else 'no'}")
