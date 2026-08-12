@@ -5,6 +5,7 @@ from ui_components import (
     APP_TITLE,
     DATA_PATH,
     get_benchmark_index,
+    create_workflow_progress,
     render_agent_trace,
     render_match_chart,
     render_match_table,
@@ -29,6 +30,11 @@ st.write(
 st.info(
     "MOH fee benchmarks are reference ranges for routine and typical private-sector cases. They are not public-hospital "
     "benchmarks, insurance coverage decisions, or provider quotes."
+)
+st.caption(
+    "**Hospital fees** are the facility or provider component of a bill. **Professional fees** are the separate charges "
+    "for clinical services by healthcare professionals, such as the surgeon, doctor, or anaesthetist. Ask the provider "
+    "for an itemised estimate because the components applicable to a procedure can vary."
 )
 
 if not DATA_PATH.exists():
@@ -61,12 +67,13 @@ if submitted:
         client = LLMClient(settings.provider, settings.api_key, settings.model, settings.base_url)
         with st.spinner("Planning, retrieving benchmark rows, and evaluating the answer..."):
             try:
+                progress_update = create_workflow_progress()
                 result = run_agent_workflow(
                     client,
                     "Procedure cost estimate",
                     question,
                     benchmark_index,
-                    retrieval_anchor=procedure.strip(),
+                    progress_callback=progress_update,
                 )
                 st.session_state[f"{PREFIX}_answer"] = result.answer
                 st.session_state[f"{PREFIX}_steps"] = result.steps

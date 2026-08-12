@@ -17,7 +17,7 @@ st.markdown(
     """
 1. **Bound and screen input:** retain a short conversation window, cap input size, and detect prompt-injection and emergency patterns.
 2. **Plan:** an LLM planner proposes a mode and tools as JSON. A parser enforces the mode, tool allowlist, and required safety tools; invalid plans fall back to deterministic routing.
-3. **Act:** tools retrieve curated official sources, search MOH workbook records, and identify missing scenario details.
+3. **Act:** MeSH expands terminology for retrieval, curated official sources provide context, the MOH workbook supplies fee evidence, and a final check identifies missing scenario details.
 4. **Compose:** the model receives only bounded conversation context and explicit tool observations, with healthcare and grounding constraints.
 5. **Evaluate:** a separate prompt checks safety, unsupported claims, source use, and benchmark caveats.
 6. **Revise:** if the evaluation fails, the composer gets one bounded revision. The UI exposes every stage in the workflow trace.
@@ -33,14 +33,20 @@ digraph CarePathway {
   input [label="Generic user question"];
   guard [label="Input bounds + safety check"];
   plan [label="Constrained planner"];
+  mesh [label="MeSH terminology search"];
   source [label="Official-source lookup"];
+  fee [label="MOH fee benchmark search"];
   missing [label="Missing-information tool"];
   compose [label="Non-diagnostic answer composer"];
   eval [label="Quality evaluator"];
   revise [label="Optional one-time revision"];
   output [label="Answer + sources + trace"];
   input -> guard -> plan;
+  plan -> mesh;
   plan -> source;
+  mesh -> fee;
+  source -> fee;
+  fee -> compose;
   plan -> missing;
   source -> compose;
   missing -> compose;
@@ -51,7 +57,6 @@ digraph CarePathway {
   revise -> output;
 }
 """,
-    width="stretch",
 )
 
 st.header("Use case 2 flowchart · Fee Benchmark Explorer")
@@ -63,24 +68,24 @@ digraph FeeExplorer {
   form [label="Procedure + setting + fee scope"];
   guard [label="Input bounds + safety check"];
   plan [label="Constrained planner"];
-  retrieve [label="BM25 + optional vector retrieval"];
+  mesh [label="MeSH terminology search"];
+  retrieve [label="MOH workbook retrieval"];
   rerank [label="Threshold + field boosts + MMR"];
   source [label="MOH source lookup"];
   compose [label="Grounded benchmark explanation"];
   eval [label="Quality evaluator"];
   present [label="Text + table + range chart + trace"];
   form -> guard -> plan;
-  plan -> retrieve -> rerank -> compose;
+  plan -> mesh -> retrieve -> rerank -> compose;
   plan -> source -> compose;
   compose -> eval -> present;
 }
 """,
-    width="stretch",
 )
 
 st.header("Retrieval and presentation")
 st.write(
-    "Workbook rows are normalised into LangChain Documents and split into bounded chunks. BM25 is always available. "
+    "The MeSH terminology layer broadens retrieval without diagnosing the user. Workbook rows are normalised into LangChain Documents and split into bounded chunks. BM25 is always available. "
     "When explicitly enabled with an OpenAI or compatible key, an in-memory embedding index is added. A dedicated "
     "procedure/diagnosis anchor, whole-token matching, focused terminology expansion, reciprocal-rank fusion, and "
     "once-per-record boosts prevent form labels from overwhelming relevance. MMR-style diversification then produces "

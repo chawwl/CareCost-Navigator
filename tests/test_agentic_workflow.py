@@ -8,6 +8,7 @@ from agentic_workflow import (
     build_retrieval_query,
     infer_workflow_mode,
     parse_planner_output,
+    query_needs_interpretation,
     run_agent_workflow,
     search_official_sources,
 )
@@ -33,6 +34,15 @@ class SequenceClient:
 
     def complete(self, system: str, user: str) -> str:
         return next(self.responses)
+
+
+class UnavailableModelClient:
+    @property
+    def available(self) -> bool:
+        return True
+
+    def complete(self, system: str, user: str) -> str:
+        raise RuntimeError("provider unavailable")
 
 
 class AgenticWorkflowTests(unittest.TestCase):
@@ -101,6 +111,25 @@ class AgenticWorkflowTests(unittest.TestCase):
         self.assertIn("colonoscopy", query.lower())
         self.assertIn("doctor fee", query.lower())
 
+    def test_interpretation_section_is_reserved_for_ambiguous_symptoms(self) -> None:
+        self.assertTrue(query_needs_interpretation("I have pain in my stomach after eating."))
+        self.assertFalse(query_needs_interpretation("What should I ask about an upper GI endoscopy?"))
+
+    def test_symptom_driven_fee_search_includes_medical_caveat(self) -> None:
+        record = make_record(
+            "Surgeon Fee Benchmarks", 10,
+            {"description": "Upper GI Endoscopy", "lower_fee": "1000", "upper_fee": "2000"},
+        )
+        result = run_agent_workflow(
+            NoKeyClient(),
+            "Procedure cost estimate",
+            "What might stomach pain after eating cost?",
+            build_benchmark_index([record]),
+        )
+        self.assertIn("Please consult a qualified medical professional for a proper diagnosis", result.answer)
+        self.assertIn("This is only a cost-information estimate based on the symptoms", result.answer)
+        self.assertIn("Understanding fee components", result.answer)
+
     def test_failed_quality_gate_triggers_one_revision(self) -> None:
         record = make_record(
             "Surgeon Fee Benchmarks",
@@ -130,6 +159,20 @@ class AgenticWorkflowTests(unittest.TestCase):
         self.assertEqual(result.revision_count, 1)
         self.assertIn("not a quote", result.answer)
         self.assertIn("Answer Revision", [step.name for step in result.steps])
+
+    def test_model_outage_preserves_grounded_retrieval_result(self) -> None:
+        record = make_record(
+            "Surgeon Fee Benchmarks", 9,
+            {"tosp": "SF123", "description": "Colonoscopy", "lower_fee": "1000", "upper_fee": "2000"},
+        )
+        result = run_agent_workflow(
+            UnavailableModelClient(),
+            "Procedure cost estimate",
+            "What is the colonoscopy fee?",
+            build_benchmark_index([record]),
+        )
+        self.assertIn("retrieval-only mode", result.answer)
+        self.assertEqual(result.matches[0][0].record_id, record.record_id)
 
 
 if __name__ == "__main__":

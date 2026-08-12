@@ -9,7 +9,7 @@ require_access()
 
 st.title("About Us")
 st.write(
-    "CareCost Navigator is an individual AI Bootcamp capstone prototype for citizens seeking clearer, scenario-specific "
+    "CareCost Navigator is an AI Bootcamp capstone prototype for citizens seeking clearer, scenario-specific "
     "information about healthcare conversations and private-sector fee benchmarks in Singapore."
 )
 

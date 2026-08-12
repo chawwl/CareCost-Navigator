@@ -23,7 +23,7 @@ class StreamlitPageTests(unittest.TestCase):
     def test_care_pathway_retrieval_only_turn(self) -> None:
         app = AppTest.from_file("pages/1_Care_Pathway_Guide.py").run(timeout=60)
         self.assertEqual([toggle.label for toggle in app.toggle], ["Use semantic retrieval"])
-        self.assertTrue(app.toggle[0].value)
+        self.assertFalse(app.toggle[0].value)
         app.chat_input[0].set_value(
             "My doctor mentioned a colonoscopy. What questions should I ask?"
         ).run(timeout=60)

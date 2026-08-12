@@ -14,6 +14,7 @@ from agentic_workflow import (
     OfficialSource,
     resolve_api_key,
 )
+from utils.mesh_rag import clear_mesh_cache, mesh_cache_info
 from utils.benchmark_rag import (
     BenchmarkIndex,
     BenchmarkRecord,
@@ -111,7 +112,7 @@ def render_model_sidebar(key_prefix: str, *, allow_semantic_search: bool = False
         if allow_semantic_search and provider in {"OpenAI", "OpenAI-compatible"}:
             semantic_search = st.toggle(
                 "Use semantic retrieval",
-                value=True,
+                value=False,
                 key=f"{key_prefix}_semantic",
                 help="Uses the same API key for an in-memory embedding index. BM25 remains available when off.",
             )
@@ -120,6 +121,13 @@ def render_model_sidebar(key_prefix: str, *, allow_semantic_search: bool = False
                     "Embedding model", value=DEFAULT_EMBEDDING_MODEL, key=f"{key_prefix}_embedding"
                 )
         st.caption("No key? The official-source and BM25 retrieval tools still work in retrieval-only mode.")
+
+        with st.expander("MeSH retrieval cache", expanded=False):
+            info = mesh_cache_info()
+            st.caption(f"In-memory NLM query cache: {info['currsize']} cached queries")
+            if st.button("Clear MeSH cache", key=f"{key_prefix}_clear_mesh_cache"):
+                clear_mesh_cache()
+                st.success("MeSH cache cleared.")
     return ModelSettings(provider, model, api_key, base_url, embedding_model, semantic_search)
 
 
@@ -159,6 +167,83 @@ def render_chat_messages(messages: list[dict[str, str]]) -> None:
         with st.chat_message(message.get("role", "assistant")):
             st.markdown(message.get("content", ""))
 
+WORKFLOW_PROGRESS_STEPS = (
+    ("planner", "Planning"),
+    ("safety_check", "Safety check"),
+    ("mesh_rag", "MeSH terminology search"),
+    ("official_source_lookup", "Official source lookup"),
+    ("benchmark_search", "Fee benchmark search"),
+    ("missing_information_check", "Checking for missing information"),
+    ("answer_composer", "Preparing answer"),
+    ("quality_evaluator", "Evaluating answer"),
+    ("answer_revision", "Finalising answer"),
+)
+
+
+def create_workflow_progress():
+    """Render all workflow stages and update them live."""
+    statuses = {key: "pending" for key, _label in WORKFLOW_PROGRESS_STEPS}
+    placeholder = st.empty()
+    bar = st.progress(0)
+
+    def render() -> None:
+        completed = sum(
+            status in {"completed", "skipped"}
+            for status in statuses.values()
+        )
+        bar.progress(completed / len(statuses) if statuses else 0)
+
+        rows = []
+        for key, label in WORKFLOW_PROGRESS_STEPS:
+            status = statuses[key]
+            icon = {
+                "pending": "○",
+                "running": "●",
+                "completed": "✓",
+                "skipped": "–",
+                "error": "!",
+            }.get(status, "○")
+            css = status
+
+            rows.append(
+                f'<div class="ccn-progress-step {css}">'
+                f'<span class="ccn-progress-icon">{icon}</span>'
+                f'<span>{label}</span>'
+                f'</div>'
+            )
+
+        placeholder.markdown(
+            """
+            <style>
+            .ccn-progress-step {
+                display: flex;
+                align-items: center;
+                gap: .55rem;
+                margin: .28rem 0;
+                font-size: .92rem;
+            }
+            .ccn-progress-step.pending { opacity: .28; }
+            .ccn-progress-step.running { opacity: 1; font-weight: 700; }
+            .ccn-progress-step.completed { opacity: 1; }
+            .ccn-progress-step.skipped { opacity: .5; }
+            .ccn-progress-step.error { opacity: 1; font-weight: 700; }
+            .ccn-progress-icon {
+                width: 1.1rem;
+                text-align: center;
+                font-weight: 700;
+            }
+            </style>
+            """ + "".join(rows),
+            unsafe_allow_html=True,
+        )
+
+    def update(step_key: str, status: str) -> None:
+        if step_key in statuses:
+            statuses[step_key] = status
+            render()
+
+    render()
+    return update
 
 def render_agent_trace(steps: list[AgentStep], inferred_mode: str = "") -> None:
     with st.expander("Agent workflow trace", expanded=False):
@@ -169,6 +254,14 @@ def render_agent_trace(steps: list[AgentStep], inferred_mode: str = "") -> None:
             st.caption(f"Workflow route: {inferred_mode}")
         for index, step in enumerate(steps, start=1):
             st.markdown(f"**{index}. {step.name}** · `{step.kind}` · `{step.status}`")
+            if step.name in {"Answer Composer", "Answer Revision"}:
+                if step.status == "completed":
+                    st.caption("Completed successfully.")
+                elif step.status == "fallback":
+                    st.caption("Model output was unavailable; a grounded retrieval-only response was used.")
+                else:
+                    st.caption("This stage did not complete.")
+                continue
             st.markdown(step.output)
 
 
@@ -178,7 +271,7 @@ def match_rows(matches: list[tuple[BenchmarkRecord, float]]) -> pd.DataFrame:
         lower, upper = estimate_amounts(record)
         rows.append(
             {
-                "retrieval_score": score,
+                "relevance": score,
                 "benchmark": first_matching_field(
                     record, ("description", "drg_description", "ccs", "ward_type", "note")
                 ),
@@ -195,8 +288,7 @@ def render_match_table(matches: list[tuple[BenchmarkRecord, float]]) -> None:
     if not matches:
         st.info("No benchmark rows matched this query.")
         return
-    st.dataframe(match_rows(matches), hide_index=True, width="stretch")
-    st.caption("Retrieval scores are internal ranking values, not percentages or clinical confidence scores.")
+    st.dataframe(match_rows(matches), hide_index=True, use_container_width=True)
 
 
 def render_match_chart(matches: list[tuple[BenchmarkRecord, float]]) -> None:

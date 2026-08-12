@@ -8,3 +8,7 @@ __pycache__/
 tmp/
 reference/
 task/
+.DS_Store
+**/.DS_Store
+data/*.xml
+data/.mesh_index.json

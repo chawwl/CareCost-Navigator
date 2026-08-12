@@ -4,6 +4,7 @@ from agentic_workflow import AgentStep, LLMClient, run_agent_workflow
 from ui_components import (
     APP_TITLE,
     clear_chat_state,
+    create_workflow_progress,
     get_benchmark_index,
     initialize_chat_state,
     render_agent_trace,
@@ -34,6 +35,22 @@ st.write(
     "and questions to ask a clinician. Follow-up turns reuse recent conversation context."
 )
 st.warning("Do not enter personally identifiable or sensitive record details. Call 995 for a life-threatening emergency.")
+st.markdown(
+    """
+    <style>
+    /* Keep answer sections easy to scan without making them look like page titles. */
+    [data-testid="stChatMessage"] h1,
+    [data-testid="stChatMessage"] h2,
+    [data-testid="stChatMessage"] h3,
+    [data-testid="stChatMessage"] h4 {
+        font-size: 1rem !important;
+        font-weight: 700 !important;
+        margin: 0.8rem 0 0.25rem !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 benchmark_index = get_benchmark_index(settings)
 question = st.chat_input("Example: My doctor mentioned a colonoscopy. What should I ask before deciding?")
@@ -42,12 +59,14 @@ if question:
     client = LLMClient(settings.provider, settings.api_key, settings.model, settings.base_url)
     with st.spinner("Planning, calling tools, and evaluating the answer..."):
         try:
+            progress_update = create_workflow_progress()
             result = run_agent_workflow(
                 client,
                 "Condition to procedures",
                 question,
                 benchmark_index,
                 conversation_history=previous_messages,
+                progress_callback=progress_update,
             )
             answer = result.answer
             st.session_state[f"{PREFIX}_steps"] = result.steps

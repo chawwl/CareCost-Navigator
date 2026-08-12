@@ -13,6 +13,7 @@ For a detailed technical walkthrough, including the agent state machine and comp
 A conversational guide for a symptom, diagnosis, or procedure. It:
 
 - screens for possible emergency warning signs;
+- expands recognised medical terminology through MeSH strictly for retrieval, not diagnosis;
 - retrieves relevant guidance from a curated allowlist of official Singapore sources;
 - explains possible care or procedure categories without deciding what treatment is needed;
 - identifies missing context and supports follow-up questions; and
@@ -40,6 +41,7 @@ input guard -> constrained planner -> allowlisted tools -> answer composer
 The planner proposes JSON containing a route and tool list. The application validates it, removes unknown tools, restores mandatory safety tools, and falls back to deterministic routing if the plan is malformed. The available tools are:
 
 - `safety_check`
+- `mesh_rag`
 - `official_source_lookup`
 - `benchmark_search`
 - `missing_information_check`
