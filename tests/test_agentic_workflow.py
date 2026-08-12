@@ -5,6 +5,7 @@ import unittest
 from agentic_workflow import (
     ALLOWED_TOOLS,
     assess_input_safety,
+    build_retrieval_query,
     infer_workflow_mode,
     parse_planner_output,
     run_agent_workflow,
@@ -90,6 +91,15 @@ class AgenticWorkflowTests(unittest.TestCase):
         self.assertEqual(result.matches[0][0].record_id, record.record_id)
         self.assertIn("benchmark_search", {step.name.removeprefix("Tool · ") for step in result.steps})
         self.assertTrue(result.sources)
+
+    def test_conversational_retrieval_can_still_use_prior_user_context(self) -> None:
+        query = build_retrieval_query(
+            [{"role": "user", "content": "My doctor mentioned a colonoscopy."}],
+            "What about the doctor fee?",
+        )
+
+        self.assertIn("colonoscopy", query.lower())
+        self.assertIn("doctor fee", query.lower())
 
     def test_failed_quality_gate_triggers_one_revision(self) -> None:
         record = make_record(

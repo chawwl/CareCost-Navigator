@@ -68,7 +68,7 @@ The page performs the following sequence:
 
 1. Initialises namespaced Streamlit session keys for messages, workflow steps, matches, sources, safety flags, and mode.
 2. Renders provider, model, API key, and compatible-endpoint settings.
-3. Builds or reuses the cached benchmark index. Semantic retrieval is not enabled on this page, so its index is BM25-only.
+3. Builds or reuses the cached benchmark index. Semantic retrieval is enabled by default for OpenAI and OpenAI-compatible providers: when an API key is available, the index combines BM25 with an in-memory embedding store; without a key, it remains BM25-only.
 4. Accepts a message through `st.chat_input`.
 5. Copies the existing conversation before adding the new turn.
 6. Creates an `LLMClient` and calls `run_agent_workflow` with the fixed mode `Condition to procedures`.
@@ -83,10 +83,10 @@ The fee page performs a similar sequence, but starts from a form:
 
 1. The user enters a procedure, diagnosis, or TOSP code.
 2. The user selects a care setting and fee component.
-3. The page combines those fields into a single workflow question.
+3. The page combines those fields into a workflow question while retaining the raw procedure/diagnosis field as a separate retrieval anchor.
 4. The benchmark index is loaded after form submission.
 5. If semantic retrieval is enabled and an OpenAI or compatible key is available, the cached index includes both BM25 and an in-memory vector store. Otherwise it remains BM25-only.
-6. `run_agent_workflow` is called with the fixed mode `Procedure cost estimate`.
+6. `run_agent_workflow` is called with the fixed mode `Procedure cost estimate`. Each form submission is independent and does not reuse a previous fee search as conversation history.
 7. The returned benchmark matches are converted to a DataFrame.
 8. The UI displays the answer, source sheet and row, retrieval score, parsed lower/upper amounts, and a bar chart for rows that contain usable amount fields.
 
@@ -205,7 +205,7 @@ At most three positive-scoring sources are returned. The model is instructed to 
 
 #### `benchmark_search`
 
-Builds a retrieval query from the current question and up to the last three user turns, then calls `search_benchmark_records`. Its result is stored in `state.matches` and serialised into the tool observation.
+Builds a retrieval query from the current question and any conversation history supplied by the calling page, then calls `search_benchmark_records`. The Fee Benchmark Explorer also supplies its raw procedure/diagnosis field as a dedicated anchor, so care-setting labels and earlier form submissions cannot become clinical search terms. The result is stored in `state.matches` and serialised into the tool observation.
 
 The full retrieval pipeline is explained in Section 6.
 
@@ -312,7 +312,7 @@ flowchart TD
     C --> B[BM25 index]
     C --> V[Optional embedding index]
 
-    Q[User query + recent turns] --> E[Expand query and infer intent]
+    Q[Clinical anchor + structured context] --> E[Expand anchor and infer intent]
     E --> B
     E --> V
     B --> M[Merge record candidates]
@@ -399,7 +399,7 @@ The `BenchmarkIndex` also stores document-frequency and average-record-length st
 
 Semantic retrieval is available only when all of the following are true:
 
-- the Fee Benchmark Explorer enables **Use semantic retrieval**;
+- the Care Pathway Guide or Fee Benchmark Explorer enables **Use semantic retrieval**;
 - the selected provider is OpenAI or OpenAI-compatible; and
 - an API key is available.
 
@@ -407,48 +407,47 @@ Semantic retrieval is available only when all of the following are true:
 
 If embedding creation fails, the application records a retrieval note and continues with BM25 rather than failing the entire index.
 
-### 6.7 Conversation-aware query construction
+### 6.7 Anchor and conversation handling
 
-`build_retrieval_query` joins the current question with up to the last three user turns. This supports follow-ups such as:
+`build_retrieval_query` can join the current question with up to the last three user turns. The conversational Care Pathway Guide uses this to support follow-ups such as:
 
 ```text
 User: What is the benchmark for a colonoscopy?
 User: Doctor fees only.
 ```
 
-The combined query retains the procedure anchor from the earlier turn.
+The combined query retains the procedure anchor from the earlier turn. The Fee Benchmark Explorer is deliberately stateless: it passes the current procedure/diagnosis field as a separate anchor and does not reuse earlier form submissions.
 
 ### 6.8 Multi-query expansion
 
-`build_multi_query_variants` creates several deduplicated forms of a query:
+When an explicit clinical anchor is available, `build_multi_query_variants` creates only focused, deduplicated forms:
 
-1. the original query;
-2. the query plus workflow mode;
-3. any extracted code as a separate query; and
-4. intent-specific expansions.
+1. the raw clinical anchor;
+2. the anchor with recognised terminology aliases; and
+3. any extracted code as a separate query.
 
-Examples of intent expansions include:
+For example, `appendicitis` expands to the workbook terminology `appendicectomy` and `appendectomy`. If no clinical anchor can be derived, the generic fallback can still add intent terms such as:
 
 - hospital fee, lower, upper, and average length of stay;
 - surgeon, anaesthetist, doctor fee, lower, and upper;
 - DRG, CCS, ICD, diagnosis, and medical condition; and
 - TOSP, procedure description, and surgical.
 
-Individual terms also receive synonym-style expansions. For example, `cost` expands to `fee`, `bill`, `benchmark`, `lower`, and `upper`; `doctor` expands to `surgeon`, `anaesthetist`, and `attendance`.
+Generic terms such as `care`, `setting`, `component`, `not`, `sure`, and `none` are excluded from anchor specificity.
 
 This improves recall when a citizen's wording differs from workbook terminology.
 
 ### 6.9 Query analysis
 
-For each query variant, the retriever derives:
+Before retrieval, the pipeline derives:
 
-- expanded query terms;
-- specific terms after removing generic words such as `cost`, `fee`, and `procedure`;
-- quoted, two-word, and three-word phrases;
+- expanded clinical anchor terms;
+- specific terms after removing form and fee words such as `care`, `setting`, `cost`, `fee`, and `procedure`;
+- quoted, two-word, and three-word anchor phrases;
 - code patterns such as an alphabetic prefix followed by digits; and
 - intents such as hospital fee, doctor fee, medical condition, surgical, and inpatient.
 
-The original query's specific terms are preferred so that generic expansion text does not become the main relevance anchor.
+The dedicated anchor terms remain the relevance gate for every variant, so generated context cannot become the main match reason.
 
 ### 6.10 Candidate retrieval and merging
 
@@ -460,6 +459,7 @@ For each query variant:
 - Vector results, when available, are merged using normalised similarity with source weight `1.25`, plus a smaller reciprocal-rank component.
 - Chunks map back to their parent record through `record_id`.
 - Evidence from different query variants and retrieval sources accumulates on the same record candidate.
+- Repeated chunks from the same record are counted only once per source and query variant.
 
 The reciprocal-rank function is:
 
@@ -469,13 +469,15 @@ reciprocal_rank(rank) = 1 / (60 + rank + 1)
 
 ### 6.11 Specific-term gate
 
-Before a candidate receives a positive custom score, it must match at least one specific term when specific terms exist. When the query contains a recognised code, at least one extracted code must appear in the record text.
+Before a candidate receives a positive custom score, it must match at least one whole anchor token when anchor terms exist. Substrings do not count: for example, `not` cannot match `note`. When the query contains a recognised code, the complete code token must appear in the record text.
+
+For an anchored fee search, General Principles guidance and CCS/ICD mapping records are also kept out of the priced evidence set. Guidance still comes from the separately curated official-source context.
 
 This gate prevents a row from ranking highly only because it contains generic words such as “fee,” “hospital,” or “procedure.”
 
-### 6.12 Custom relevance score
+### 6.12 Custom retrieval score
 
-After the specific-term gate, the score is:
+After retrieval evidence has been fused, the record-level boosts are applied once:
 
 ```text
 score = base retrieval score
@@ -492,7 +494,7 @@ The components serve different purposes:
 
 | Component | Purpose |
 |---|---|
-| Base retrieval score | Carries BM25 rank or vector similarity into the custom score. |
+| Base retrieval score | Accumulates BM25 rank and optional vector similarity evidence. |
 | Phrase score | Rewards quoted phrases and matching two-/three-token sequences. |
 | Code score | Strongly rewards an exact TOSP/DRG-like code match. |
 | Fuzzy score | Uses `SequenceMatcher` to tolerate minor spelling differences. |
@@ -501,7 +503,7 @@ The components serve different purposes:
 | Amount boost | Rewards cost-relevant records with parsable lower and upper amounts. |
 | Specificity score | Rewards coverage of the non-generic query terms. |
 
-Important-field boosting adds `0.35` per matching query term and is capped at `3.0`. A record with parsable lower and upper amounts receives an amount boost of `2.0` for cost-related intents.
+Important-field boosting adds `0.35` per matching anchor term and is capped at `3.0`. A record with parsable lower and upper amounts receives an amount boost of `2.0` for cost-related intents. These static boosts are not multiplied by the number of query variants.
 
 ### 6.13 Threshold and fallback
 
@@ -523,7 +525,7 @@ The first result is the highest-scoring candidate. Each later candidate is selec
 MMR score = 0.72 × relevance - 0.28 × maximum token Jaccard similarity
 ```
 
-This keeps relevance dominant while penalising records whose token sets substantially overlap records already selected. Final relevance values are rounded to three decimal places.
+This keeps retrieval relevance dominant while penalising records whose token sets substantially overlap records already selected. Final retrieval scores are rounded to three decimal places.
 
 ### 6.15 Context assembly
 
@@ -579,10 +581,10 @@ Expected path:
 1. The page constructs a complete natural-language query.
 2. The fixed route is `Procedure cost estimate`.
 3. The plan is forced to include `benchmark_search`.
-4. Query expansion adds TOSP, procedure, surgeon, anaesthetist, and fee terminology.
+4. The raw `colonoscopy` field becomes the clinical anchor; structured form labels are excluded from specificity.
 5. BM25 and optional semantic retrieval produce candidates.
-6. Specific-term filtering removes unrelated generic fee rows.
-7. Field, sheet, code, fuzzy, and amount boosts rerank the candidates.
+6. Whole-token anchor filtering removes unrelated generic fee, guidance, and mapping rows.
+7. Field, sheet, code, fuzzy, and amount boosts are applied once per record.
 8. MMR selects a varied final set.
 9. The composer can mention only fee values found in these rows.
 10. The evaluator checks that the answer calls them reference ranges rather than a guaranteed price.
@@ -641,7 +643,7 @@ These safeguards reduce risk but do not prove that every response is correct or 
 - Lexical synonym expansion is hand-authored and covers only selected healthcare and cost terms.
 - The code-pattern regex does not represent every possible medical classification format.
 - Vector scores are normalised generically; different embedding/vector implementations may expose different score semantics.
-- Retrieval relevance is not clinical relevance.
+- Displayed retrieval scores are internal, unbounded ranking values, not percentages or clinical relevance/confidence.
 - `estimate_amounts` is a general field-name heuristic rather than a schema-specific parser for each workbook sheet.
 - The evaluator is an LLM-based quality check and can itself make mistakes.
 - The app does not calculate subsidies, insurance payouts, MediSave usage, or patient-specific out-of-pocket cost.
@@ -682,4 +684,3 @@ Common extensions should preserve the existing trust boundaries:
 - Replace the evaluator's parse-error fallback with a stricter deterministic validation policy for production.
 
 Any new agent tool should have a narrow purpose, explicit inputs and outputs, no access to API keys, and a user-visible trace observation.
-

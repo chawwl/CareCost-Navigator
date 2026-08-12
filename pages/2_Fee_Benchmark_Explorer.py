@@ -66,17 +66,13 @@ if submitted:
                     "Procedure cost estimate",
                     question,
                     benchmark_index,
-                    st.session_state.get(f"{PREFIX}_history", []),
+                    retrieval_anchor=procedure.strip(),
                 )
                 st.session_state[f"{PREFIX}_answer"] = result.answer
                 st.session_state[f"{PREFIX}_steps"] = result.steps
                 st.session_state[f"{PREFIX}_matches"] = result.matches
                 st.session_state[f"{PREFIX}_sources"] = result.sources
                 st.session_state[f"{PREFIX}_mode"] = result.inferred_mode
-                st.session_state[f"{PREFIX}_history"] = [
-                    {"role": "user", "content": question},
-                    {"role": "assistant", "content": result.answer},
-                ]
             except Exception as exc:
                 error = f"The workflow could not complete this search: {exc}"
                 st.session_state[f"{PREFIX}_answer"] = error

@@ -111,7 +111,7 @@ def render_model_sidebar(key_prefix: str, *, allow_semantic_search: bool = False
         if allow_semantic_search and provider in {"OpenAI", "OpenAI-compatible"}:
             semantic_search = st.toggle(
                 "Use semantic retrieval",
-                value=False,
+                value=True,
                 key=f"{key_prefix}_semantic",
                 help="Uses the same API key for an in-memory embedding index. BM25 remains available when off.",
             )
@@ -178,7 +178,7 @@ def match_rows(matches: list[tuple[BenchmarkRecord, float]]) -> pd.DataFrame:
         lower, upper = estimate_amounts(record)
         rows.append(
             {
-                "relevance": score,
+                "retrieval_score": score,
                 "benchmark": first_matching_field(
                     record, ("description", "drg_description", "ccs", "ward_type", "note")
                 ),
@@ -196,6 +196,7 @@ def render_match_table(matches: list[tuple[BenchmarkRecord, float]]) -> None:
         st.info("No benchmark rows matched this query.")
         return
     st.dataframe(match_rows(matches), hide_index=True, width="stretch")
+    st.caption("Retrieval scores are internal ranking values, not percentages or clinical confidence scores.")
 
 
 def render_match_chart(matches: list[tuple[BenchmarkRecord, float]]) -> None:

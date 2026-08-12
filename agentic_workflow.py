@@ -14,6 +14,7 @@ from utils.benchmark_rag import (
     BenchmarkIndex,
     BenchmarkRecord,
     build_context,
+    clean_text,
     estimate_amounts,
     first_matching_field,
     search_benchmark_records,
@@ -127,6 +128,7 @@ class WorkflowState:
     mode: str
     conversation_history: list[Mapping[str, str]]
     safety: SafetyAssessment
+    retrieval_anchor: str = ""
     plan: WorkflowPlan | None = None
     matches: list[tuple[BenchmarkRecord, float]] = field(default_factory=list)
     sources: list[OfficialSource] = field(default_factory=list)
@@ -385,6 +387,8 @@ def run_agent_workflow(
     question: str,
     benchmark_index: BenchmarkIndex,
     conversation_history: list[Mapping[str, str]] | None = None,
+    *,
+    retrieval_anchor: str = "",
 ) -> WorkflowResult:
     clean_question = question.strip()[:MAX_INPUT_CHARS]
     history = bounded_history(conversation_history)
@@ -394,6 +398,7 @@ def run_agent_workflow(
         mode=inferred_mode,
         conversation_history=history,
         safety=assess_input_safety(question),
+        retrieval_anchor=clean_text(retrieval_anchor)[:MAX_INPUT_CHARS],
     )
     state.plan = plan_workflow(client, inferred_mode, clean_question)
     state.mode = state.plan.mode
@@ -442,7 +447,12 @@ def execute_tool(tool_name: str, state: WorkflowState, benchmark_index: Benchmar
         return "\n".join(f"- {source.agency}: {source.title} ({source.url})" for source in state.sources)
     if tool_name == "benchmark_search":
         query = build_retrieval_query(state.conversation_history, state.question)
-        state.matches = search_benchmark_records(benchmark_index, query, state.mode)
+        state.matches = search_benchmark_records(
+            benchmark_index,
+            query,
+            state.mode,
+            anchor=state.retrieval_anchor or None,
+        )
         if not state.matches:
             return "No fee benchmark row passed the retrieval threshold."
         return f"Retrieved {len(state.matches)} MOH benchmark rows.\n{build_context(state.matches)}"

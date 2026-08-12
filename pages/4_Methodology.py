@@ -81,9 +81,10 @@ digraph FeeExplorer {
 st.header("Retrieval and presentation")
 st.write(
     "Workbook rows are normalised into LangChain Documents and split into bounded chunks. BM25 is always available. "
-    "When explicitly enabled with an OpenAI or compatible key, an in-memory embedding index is added. Multi-query "
-    "expansion, fetch-more-than-k retrieval, reciprocal-rank and field-aware boosts, thresholds, and MMR-style "
-    "diversification produce row-level evidence. Amount fields are then presented as both a table and a chart."
+    "When explicitly enabled with an OpenAI or compatible key, an in-memory embedding index is added. A dedicated "
+    "procedure/diagnosis anchor, whole-token matching, focused terminology expansion, reciprocal-rank fusion, and "
+    "once-per-record boosts prevent form labels from overwhelming relevance. MMR-style diversification then produces "
+    "row-level evidence, with amount fields presented as both a table and a chart."
 )
 
 st.header("Prompt-injection and misuse safeguards")

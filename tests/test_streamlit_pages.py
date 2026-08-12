@@ -22,6 +22,8 @@ class StreamlitPageTests(unittest.TestCase):
 
     def test_care_pathway_retrieval_only_turn(self) -> None:
         app = AppTest.from_file("pages/1_Care_Pathway_Guide.py").run(timeout=60)
+        self.assertEqual([toggle.label for toggle in app.toggle], ["Use semantic retrieval"])
+        self.assertTrue(app.toggle[0].value)
         app.chat_input[0].set_value(
             "My doctor mentioned a colonoscopy. What questions should I ask?"
         ).run(timeout=60)
@@ -38,6 +40,30 @@ class StreamlitPageTests(unittest.TestCase):
         self.assertFalse(app.exception)
         self.assertGreaterEqual(len(app.dataframe), 1)
         self.assertIn("Grounded explanation", [item.value for item in app.subheader])
+
+    def test_fee_explorer_searches_are_independent(self) -> None:
+        app = AppTest.from_file("pages/2_Fee_Benchmark_Explorer.py").run(timeout=60)
+
+        app.text_input[0].set_value("cataract")
+        app.button[0].click().run(timeout=60)
+        app.text_input[0].set_value("endometriosis")
+        app.button[0].click().run(timeout=60)
+
+        self.assertFalse(app.exception)
+        frame = app.dataframe[0].value
+        descriptions = frame["benchmark"].str.lower()
+        self.assertTrue(descriptions.str.contains("endometriosis").all())
+        self.assertFalse(descriptions.str.contains("cataract|shoulder").any())
+        self.assertFalse(frame["workbook_sheet"].str.startswith("General Principles").any())
+        self.assertNotIn("fee_explorer_history", app.session_state)
+
+        app.text_input[0].set_value("appendicitis")
+        app.button[0].click().run(timeout=60)
+
+        appendix_frame = app.dataframe[0].value
+        appendix_descriptions = appendix_frame["benchmark"].str.lower()
+        self.assertTrue(appendix_descriptions.str.contains("appendicectomy").all())
+        self.assertFalse(appendix_descriptions.str.contains("cataract|shoulder|endometriosis").any())
 
 
 if __name__ == "__main__":

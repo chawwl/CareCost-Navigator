@@ -42,6 +42,12 @@ QUERY_EXPANSIONS = {
     "condition": ("diagnosis", "drg", "ccs", "medical"),
 }
 
+MEDICAL_ALIASES = {
+    "appendicitis": ("appendicectomy", "appendectomy"),
+    "appendicectomy": ("appendicitis", "appendectomy"),
+    "appendectomy": ("appendicitis", "appendicectomy"),
+}
+
 STOPWORDS = {
     "about",
     "after",
@@ -64,21 +70,64 @@ STOPWORDS = {
 
 GENERIC_QUERY_TERMS = {
     "benchmark",
+    "benchmarks",
     "bill",
+    "bills",
+    "charge",
+    "charges",
     "cost",
+    "costs",
     "estimate",
+    "estimates",
     "fee",
     "fees",
     "hospital",
     "lower",
     "medical",
     "price",
+    "prices",
     "procedure",
     "stay",
     "surgery",
     "surgical",
     "upper",
 }
+
+ANCHOR_CONTEXT_TERMS = GENERIC_QUERY_TERMS | {
+    "additional",
+    "both",
+    "care",
+    "component",
+    "condition",
+    "context",
+    "day",
+    "diagnosis",
+    "doctor",
+    "does",
+    "exact",
+    "in",
+    "inpatient",
+    "is",
+    "looking",
+    "me",
+    "my",
+    "none",
+    "not",
+    "of",
+    "outpatient",
+    "please",
+    "professional",
+    "range",
+    "setting",
+    "should",
+    "sure",
+    "to",
+    "tosp",
+    "which",
+}
+
+GUIDANCE_SHEET_PREFIX = "general principles"
+MAPPING_SHEETS = {"ccs-icd mapping"}
 
 
 @dataclass
@@ -228,35 +277,39 @@ def serialize_record(record: BenchmarkRecord) -> str:
     return f"Sheet: {record.sheet}\nRow: {record.row_number}\n{field_text}"
 
 
-def search_benchmark_records(index: BenchmarkIndex, query: str, mode: str, limit: int = 10) -> list[tuple[BenchmarkRecord, float]]:
-    query_variants = build_multi_query_variants(query, mode)
+def search_benchmark_records(
+    index: BenchmarkIndex,
+    query: str,
+    mode: str,
+    limit: int = 10,
+    *,
+    anchor: str | None = None,
+) -> list[tuple[BenchmarkRecord, float]]:
+    search_anchor = clean_text(anchor) if anchor is not None else extract_search_anchor(query)
+    raw_anchor_terms = [term for term in tokenize(search_anchor) if term not in ANCHOR_CONTEXT_TERMS]
+    anchor_terms = expand_query_terms(raw_anchor_terms)
+    anchor_codes = extract_codes(search_anchor)
+    anchor_phrases = extract_query_phrases(search_anchor)
+    focused_anchor = search_anchor if anchor_terms or anchor_codes else None
+    query_variants = dedupe_queries(build_multi_query_variants(query, mode, focused_anchor))
     record_lookup = {record.record_id: record for record in index.records}
     candidates: dict[str, RetrievalCandidate] = {}
     fetch_k = max(limit * FETCH_K_FACTOR, limit)
-    original_terms = tokenize(query)
-    original_specific_terms = expand_query_terms([term for term in original_terms if term not in GENERIC_QUERY_TERMS])
+    intents = infer_query_intents(query, mode)
+    restrict_to_benchmarks = bool(anchor_terms or anchor_codes) and mode in {"Procedure cost estimate", "Both"}
 
     for variant in query_variants:
-        raw_terms = tokenize(variant)
-        query_terms = expand_query_terms(raw_terms)
-        specific_terms = original_specific_terms or expand_query_terms([term for term in raw_terms if term not in GENERIC_QUERY_TERMS])
-        if not query_terms:
+        if not tokenize(variant):
             continue
-
-        intents = infer_query_intents(variant, mode)
-        query_phrases = extract_query_phrases(variant)
-        query_codes = extract_codes(variant)
 
         bm25_docs = index.bm25_retriever.invoke(variant)[:fetch_k]
         merge_ranked_documents(
             candidates,
             record_lookup,
             bm25_docs,
-            query_terms,
-            specific_terms,
-            query_phrases,
-            query_codes,
-            intents,
+            anchor_terms,
+            anchor_codes,
+            restrict_to_benchmarks,
             source_weight=0.9,
         )
 
@@ -268,12 +321,22 @@ def search_benchmark_records(index: BenchmarkIndex, query: str, mode: str, limit
             candidates,
             record_lookup,
             vector_docs_with_scores,
-            query_terms,
-            specific_terms,
-            query_phrases,
-            query_codes,
-            intents,
+            anchor_terms,
+            anchor_codes,
+            restrict_to_benchmarks,
             source_weight=1.25,
+        )
+
+    for candidate in candidates.values():
+        candidate.score = retrieval_score(
+            candidate.record,
+            "",
+            anchor_terms,
+            anchor_terms,
+            anchor_phrases,
+            anchor_codes,
+            intents,
+            candidate.score,
         )
 
     ranked = sorted(candidates.values(), key=lambda candidate: candidate.score, reverse=True)
@@ -287,60 +350,53 @@ def merge_ranked_documents(
     candidates: dict[str, RetrievalCandidate],
     record_lookup: dict[str, BenchmarkRecord],
     documents: list[Document],
-    query_terms: list[str],
-    specific_terms: list[str],
-    query_phrases: list[str],
-    query_codes: list[str],
-    intents: set[str],
+    anchor_terms: list[str],
+    anchor_codes: list[str],
+    restrict_to_benchmarks: bool,
     *,
     source_weight: float,
 ) -> None:
+    seen_records: set[str] = set()
     for rank, document in enumerate(documents):
         record = record_lookup.get(str(document.metadata.get("record_id", "")))
-        if record is None:
+        if record is None or record.record_id in seen_records:
             continue
-        score = retrieval_score(
-            record,
-            document.page_content,
-            query_terms,
-            specific_terms,
-            query_phrases,
-            query_codes,
-            intents,
-            source_weight * reciprocal_rank(rank),
+        seen_records.add(record.record_id)
+        if restrict_to_benchmarks and not is_benchmark_evidence_record(record):
+            continue
+        if (anchor_terms or anchor_codes) and not has_specific_match(
+            record.searchable_text, anchor_terms, anchor_codes
+        ):
+            continue
+        get_candidate(candidates, record).add(
+            source_weight * reciprocal_rank(rank), document.page_content, rank
         )
-        if score <= 0:
-            continue
-        get_candidate(candidates, record).add(score, document.page_content, rank)
 
 
 def merge_scored_documents(
     candidates: dict[str, RetrievalCandidate],
     record_lookup: dict[str, BenchmarkRecord],
     documents_with_scores: list[tuple[Document, float]],
-    query_terms: list[str],
-    specific_terms: list[str],
-    query_phrases: list[str],
-    query_codes: list[str],
-    intents: set[str],
+    anchor_terms: list[str],
+    anchor_codes: list[str],
+    restrict_to_benchmarks: bool,
     *,
     source_weight: float,
 ) -> None:
+    seen_records: set[str] = set()
     for rank, (document, raw_score) in enumerate(documents_with_scores):
         record = record_lookup.get(str(document.metadata.get("record_id", "")))
-        if record is None:
+        if record is None or record.record_id in seen_records:
+            continue
+        seen_records.add(record.record_id)
+        if restrict_to_benchmarks and not is_benchmark_evidence_record(record):
+            continue
+        if (anchor_terms or anchor_codes) and not has_specific_match(
+            record.searchable_text, anchor_terms, anchor_codes
+        ):
             continue
         vector_score = normalize_vector_score(raw_score)
-        score = retrieval_score(
-            record,
-            document.page_content,
-            query_terms,
-            specific_terms,
-            query_phrases,
-            query_codes,
-            intents,
-            source_weight * vector_score + (0.35 * reciprocal_rank(rank)),
-        )
+        score = source_weight * vector_score + (0.35 * reciprocal_rank(rank))
         if score <= 0:
             continue
         get_candidate(candidates, record).add(score, document.page_content, rank)
@@ -391,29 +447,36 @@ def reciprocal_rank(rank: int) -> float:
 
 
 def has_specific_match(text: str, specific_terms: list[str], query_codes: list[str]) -> bool:
+    text_tokens = set(tokenize(text))
     if query_codes:
-        return any(code in text.upper() for code in query_codes)
-    return any(term in text for term in specific_terms)
+        return any(code.lower() in text_tokens for code in query_codes)
+    return any(term in text_tokens for term in specific_terms)
 
 
 def specific_term_score(text: str, specific_terms: list[str]) -> float:
     if not specific_terms:
         return 0.0
-    matched = sum(1 for term in specific_terms if term in text)
+    text_tokens = set(tokenize(text))
+    matched = sum(1 for term in specific_terms if term in text_tokens)
     return matched / len(specific_terms)
 
 
 def phrase_score(text: str, phrases: list[str]) -> float:
     if not phrases:
         return 0.0
-    return sum(1.0 for phrase in phrases if phrase and phrase in text)
+    normalized_text = f" {' '.join(tokenize(text))} "
+    return sum(
+        1.0
+        for phrase in phrases
+        if phrase and f" {' '.join(tokenize(phrase))} " in normalized_text
+    )
 
 
 def code_score(text: str, codes: list[str]) -> float:
     if not codes:
         return 0.0
-    upper_text = text.upper()
-    return sum(1.0 for code in codes if code in upper_text)
+    text_tokens = set(tokenize(text))
+    return sum(1.0 for code in codes if code.lower() in text_tokens)
 
 
 def fuzzy_score(text: str, query_terms: list[str]) -> float:
@@ -453,8 +516,8 @@ def field_boost(record: BenchmarkRecord, query_terms: list[str]) -> float:
     for key, value in record.fields.items():
         if not any(field in key for field in important_fields):
             continue
-        field_text = value.lower()
-        boost += sum(0.35 for term in query_terms if term in field_text)
+        field_tokens = set(tokenize(value))
+        boost += sum(0.35 for term in query_terms if term in field_tokens)
     return min(boost, 3.0)
 
 
@@ -494,7 +557,13 @@ def token_jaccard(left: BenchmarkRecord, right: BenchmarkRecord) -> float:
     return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
 
 
-def build_multi_query_variants(query: str, mode: str) -> list[str]:
+def build_multi_query_variants(query: str, mode: str, anchor: str | None = None) -> list[str]:
+    if anchor:
+        anchor_terms = [term for term in tokenize(anchor) if term not in ANCHOR_CONTEXT_TERMS]
+        expanded_anchor = " ".join(expand_query_terms(anchor_terms))
+        variants = [anchor, expanded_anchor, *extract_codes(anchor)]
+        return dedupe_queries(variants)
+
     variants = [
         query,
         f"{query} {mode}",
@@ -513,14 +582,43 @@ def build_multi_query_variants(query: str, mode: str) -> list[str]:
     if "surgical" in intent:
         variants.append(f"{query} TOSP procedure description surgical")
 
-    deduped = []
+    return dedupe_queries(variants)
+
+
+def dedupe_queries(queries: list[str]) -> list[str]:
+    deduped: list[str] = []
     seen = set()
-    for variant in variants:
+    for variant in queries:
         normalized = clean_text(variant).lower()
         if normalized and normalized not in seen:
             seen.add(normalized)
             deduped.append(variant)
     return deduped
+
+
+def extract_search_anchor(query: str) -> str:
+    cleaned = clean_text(query)
+    form_match = re.search(
+        r"\bestimate\s+the\s+fee\s+benchmark\s+for\s+(.+?)"
+        r"(?:\.\s*(?:care\s+setting|fee\s+component|additional\s+context)\s*:|$)",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if form_match:
+        return clean_text(form_match.group(1))
+    return cleaned
+
+
+def is_guidance_record(record: BenchmarkRecord) -> bool:
+    return record.sheet.strip().lower().startswith(GUIDANCE_SHEET_PREFIX)
+
+
+def is_mapping_record(record: BenchmarkRecord) -> bool:
+    return record.sheet.strip().lower() in MAPPING_SHEETS
+
+
+def is_benchmark_evidence_record(record: BenchmarkRecord) -> bool:
+    return not is_guidance_record(record) and not is_mapping_record(record)
 
 
 def build_context(matches: list[tuple[BenchmarkRecord, float]]) -> str:
@@ -624,6 +722,7 @@ def expand_query_terms(terms: list[str]) -> list[str]:
     for term in terms:
         expanded.append(term)
         expanded.extend(QUERY_EXPANSIONS.get(term, ()))
+        expanded.extend(MEDICAL_ALIASES.get(term, ()))
     return list(dict.fromkeys(expanded))
 
 

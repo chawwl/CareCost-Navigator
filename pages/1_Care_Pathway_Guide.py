@@ -20,7 +20,7 @@ PREFIX = "care_pathway"
 st.set_page_config(page_title=f"Care Pathway Guide · {APP_TITLE}", page_icon="🩺", layout="wide")
 require_access()
 initialize_chat_state(PREFIX)
-settings = render_model_sidebar(PREFIX)
+settings = render_model_sidebar(PREFIX, allow_semantic_search=True)
 
 with st.sidebar:
     st.divider()
@@ -47,7 +47,7 @@ if question:
                 "Condition to procedures",
                 question,
                 benchmark_index,
-                previous_messages,
+                conversation_history=previous_messages,
             )
             answer = result.answer
             st.session_state[f"{PREFIX}_steps"] = result.steps
