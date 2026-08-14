@@ -1,6 +1,6 @@
 # CareCost Navigator
 
-CareCost Navigator is a multi-page Streamlit capstone prototype that helps people prepare for healthcare conversations and explore Singapore Ministry of Health (MOH) private-sector fee benchmark ranges. It uses an explicit agentic workflow implemented in plain Python.
+CareCost Navigator is a multi-page Streamlit capstone prototype for healthcare navigation and Singapore Ministry of Health (MOH) cost information. It deliberately separates a conversational, non-diagnostic Care Pathway Guide from a known-procedure Fee Benchmark Explorer.
 
 For a detailed technical walkthrough, including the agent state machine and complete retrieval/reranking pipeline, see [How CareCost Navigator Works](docs/HOW_THE_APP_WORKS.md).
 
@@ -10,23 +10,28 @@ For a detailed technical walkthrough, including the agent state machine and comp
 
 ### 1. Care Pathway Guide
 
-A conversational guide for a symptom, diagnosis, or procedure. It:
+A conversational guide for a symptom or known condition. It:
 
 - screens for possible emergency warning signs;
 - expands recognised medical terminology through MeSH strictly for retrieval, not diagnosis;
+- uses the LLM to give carefully labelled general education for a named condition, including common symptoms and care options a clinician may discuss;
 - retrieves relevant guidance from a curated allowlist of official Singapore sources;
-- explains possible care or procedure categories without deciding what treatment is needed;
+- never diagnoses, prescribes, or claims that a procedure is necessary;
 - identifies missing context and supports follow-up questions; and
 - shows the planner, tools, composer, evaluator, and revision trace.
 
 ### 2. Fee Benchmark Explorer
 
-A guided form for a procedure, diagnosis, or TOSP code, care setting, and fee component. It:
+A guided form for a known procedure, diagnosis, or TOSP code, care setting, and fee component. Symptom-only descriptions are directed to the Care Pathway Guide. It:
 
-- searches the MOH workbook with BM25 and optional in-memory vector retrieval;
+- searches `feebenchmarks.xlsx` with BM25 and optional in-memory vector retrieval;
+- separately searches `hospitalbillsizes.xlsx` for hospital-stay bill-size rows;
+- lets the user narrow stay-cost rows by hospital and ward type, with hospital labels shown as `Full Name (ABBREVIATION)`;
 - applies query expansion, thresholds, field-aware boosts, reranking, and MMR-style diversification;
 - grounds cost statements in matched workbook rows; and
-- presents results as an explanation, evidence table, and lower/upper range chart.
+- presents fee-benchmark rows, hospital stay bill-size rows, and a lower/upper range chart separately.
+
+Hospital-stay rows can include P25, P50, and P75 total bill amounts and average length of stay (ALOS), where present in the source workbook. They are descriptive percentiles, not a bill quote or prediction.
 
 ## Agentic workflow
 
@@ -44,6 +49,7 @@ The planner proposes JSON containing a route and tool list. The application vali
 - `mesh_rag`
 - `official_source_lookup`
 - `benchmark_search`
+- `hospital_bill_search` (Fee Benchmark Explorer only)
 - `missing_information_check`
 
 This gives the workflow goal-directed routing, tool selection, shared state, observations, evaluation, and iteration without a multi-agent framework dependency.
@@ -61,18 +67,28 @@ ui_components.py                    Shared Streamlit UI and cached index loading
 utils/benchmark_rag.py              Workbook ingestion and retrieval pipeline
 data/official_sources.json          Curated official-source allowlist
 data/feebenchmarks.xlsx             MOH fee benchmark workbook
+data/hospitalbillsizes.xlsx         MOH hospital bill-size workbook
 tests/                              Workflow and safeguard tests
 ```
 
-## Official sources
+## Curated sources
 
-The local source registry was reviewed on 10 August 2026 and links to:
+The local source registry was reviewed on 14 August 2026 and links to:
 
 - [MOH Hospital Bills and Fee Benchmarks](https://www.moh.gov.sg/managing-expenses/bills-and-fee-benchmarks/hospital-bills-and-fee-benchmarks/)
 - [MOH Getting medical help](https://www.moh.gov.sg/seeking-healthcare/getting-medical-help/)
+- [MOH Conditions](https://www.moh.gov.sg/seeking-healthcare/getting-medical-help/conditions/)
+- [MOH Visiting a pharmacist](https://www.moh.gov.sg/seeking-healthcare/getting-medical-help/visiting-a-pharmacist/)
+- [MOH Seeking a doctor](https://www.moh.gov.sg/seeking-healthcare/getting-medical-help/seeking-a-doctor/)
+- [MOH When to visit the hospital for emergencies](https://www.moh.gov.sg/seeking-healthcare/getting-medical-help/visiting-the-hospital-for-emergencies/)
 - [SCDF Emergency Medical Services](https://www.scdf.gov.sg/home/about-scdf/emergency-medical-services)
+- [HealthHub public healthcare institutions by cluster](https://support.healthhub.sg/hc/en-us/articles/57937601611033-What-are-the-public-healthcare-institutions-under-each-cluster)
+- [NUHS Find a Condition](https://www.nuhs.edu.sg/patient-care/find-a-condition)
+- [SingHealth Symptoms & Medical Conditions](https://www.singhealth.com.sg/symptoms-treatments/symptoms-treatments-medical-conditions)
+- [Mount Elizabeth Conditions & Diseases](https://www.mountelizabeth.com.sg/conditions-diseases)
+- [Gleneagles Conditions & Diseases](https://www.gleneagles.com.sg/conditions-diseases)
 
-The workbook should be refreshed from the MOH page before a production deployment. Source summaries in the repository are not a substitute for checking the linked official pages.
+MOH and SCDF entries are official public guidance. The NUHS, SingHealth, Mount Elizabeth, and Gleneagles entries are clearly labelled **Supplementary provider education** in the app; they are useful for general condition information but are not MOH policy, diagnosis, or personalised medical advice. Source summaries in the repository are not a substitute for checking the linked pages.
 
 ## Prompt-injection and misuse safeguards
 
@@ -81,8 +97,9 @@ The workbook should be refreshed from the MOH page before a production deploymen
 - Rule-based screening flags common instruction-override, prompt-disclosure, credential, delimiter, and jailbreak patterns.
 - Planner output is parsed and restricted to a fixed tool allowlist.
 - The workflow has no shell, code-execution, filesystem-write, credential, general-web, or arbitrary-URL tool.
-- Cost statements must use retrieved workbook rows; source links must come from the local allowlist.
-- A separate evaluator checks diagnosis language, emergency escalation, benchmark caveats, unsupported claims, and source use.
+- Cost statements must use retrieved fee-benchmark or hospital bill-size workbook rows; source links must come from the local allowlist.
+- Symptom-derived cost information carries a deterministic scope notice: it is based only on the supplied description and is not diagnosis, assessment, or medical advice.
+- A separate evaluator checks emergency escalation, diagnosis boundaries, unsupported costs, benchmark caveats, and source use.
 - API keys are not inserted into prompts or written by the application.
 
 These controls reduce risk but do not guarantee prevention of every adversarial input or hallucination.
@@ -131,5 +148,7 @@ python -m unittest discover -s tests -v
 4. Add model credentials in the app's Secrets settings rather than committing them.
 5. Optionally set `APP_PASSWORD` to activate the built-in password gate.
 6. Verify both use cases, all four pages, external source links, and the evidence table/chart on the deployed URL.
+
+Ensure both workbook files (`feebenchmarks.xlsx` and `hospitalbillsizes.xlsx`) are deployed with the application.
 
 Example secrets are documented in `.streamlit/secrets.toml.example`.

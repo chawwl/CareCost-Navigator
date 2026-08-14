@@ -9,6 +9,7 @@ from agentic_workflow import (
     infer_workflow_mode,
     parse_planner_output,
     query_needs_interpretation,
+    filter_hospital_bill_matches,
     run_agent_workflow,
     search_official_sources,
 )
@@ -78,6 +79,27 @@ class AgenticWorkflowTests(unittest.TestCase):
         self.assertTrue(all(source.url.startswith("https://") for source in sources))
         self.assertIn("scdf-emergency-medical-services", {source.id for source in sources})
 
+    def test_official_source_lookup_selects_condition_and_care_sources(self) -> None:
+        sources = search_official_sources(
+            "What is endometriosis and what care options or procedures might a doctor discuss?",
+            "Condition to procedures",
+        )
+        source_ids = {source.id for source in sources}
+        self.assertIn("moh-conditions", source_ids)
+        self.assertIn("moh-seeking-a-doctor", source_ids)
+        condition_sources = search_official_sources("What is endometriosis?", "Condition to procedures")
+        condition_source_ids = {source.id for source in condition_sources}
+        self.assertIn("singhealth-conditions", condition_source_ids)
+        self.assertEqual(
+            next(source for source in condition_sources if source.id == "singhealth-conditions").source_type,
+            "Supplementary provider education",
+        )
+
+        medication_sources = search_official_sources(
+            "Can a pharmacist advise on medication side effects?", "Condition to procedures"
+        )
+        self.assertIn("moh-visiting-a-pharmacist", {source.id for source in medication_sources})
+
     def test_retrieval_only_workflow_executes_tools_without_llm(self) -> None:
         record = make_record(
             "Surgeon Fee Benchmarks",
@@ -129,6 +151,12 @@ class AgenticWorkflowTests(unittest.TestCase):
         self.assertIn("Please consult a qualified medical professional for a proper diagnosis", result.answer)
         self.assertIn("This is only a cost-information estimate based on the symptoms", result.answer)
         self.assertIn("Understanding fee components", result.answer)
+
+    def test_hospital_bill_filters_apply_selected_hospital_and_ward(self) -> None:
+        matching = make_record("Hospital bill data", 1, {"hospital": "CGH", "ward_type": "Ward B2"})
+        other = make_record("Hospital bill data", 2, {"hospital": "NUH", "ward_type": "Ward B2"})
+        filtered = filter_hospital_bill_matches([(matching, 1.0), (other, 0.9)], "CGH", "Ward B2")
+        self.assertEqual([record.record_id for record, _ in filtered], [matching.record_id])
 
     def test_failed_quality_gate_triggers_one_revision(self) -> None:
         record = make_record(

@@ -46,6 +46,198 @@
     "last_reviewed": "2026-08-10"
   },
   {
+    "id": "moh-conditions",
+    "title": "Conditions",
+    "agency": "Ministry of Health Singapore",
+    "url": "https://www.moh.gov.sg/seeking-healthcare/getting-medical-help/conditions/",
+    "topics": [
+      "conditions",
+      "diagnosis",
+      "symptoms",
+      "abdominal pain",
+      "indigestion",
+      "cold and flu",
+      "diarrhoea",
+      "vomiting",
+      "fever",
+      "headache",
+      "high blood pressure",
+      "hives",
+      "skin infection",
+      "sprain",
+      "strain"
+    ],
+    "summary": "MOH's Conditions directory links to guidance for selected common health conditions, including abdominal pain or indigestion, cold and flu, diarrhoea and vomiting, fever, headaches, high blood pressure, hives, skin infections, and strains or sprains.",
+    "guidance": [
+      "Use the condition-specific MOH page, where available, to understand common symptoms and when to seek medical care.",
+      "A directory listing is general information and does not establish a diagnosis or replace an individual clinical assessment."
+    ],
+    "last_reviewed": "2026-08-14"
+  },
+  {
+    "id": "moh-visiting-a-pharmacist",
+    "title": "Visiting a pharmacist",
+    "agency": "Ministry of Health Singapore",
+    "url": "https://www.moh.gov.sg/seeking-healthcare/getting-medical-help/visiting-a-pharmacist/",
+    "topics": [
+      "pharmacist",
+      "pharmacy",
+      "medication",
+      "medicine",
+      "side effects",
+      "drug interactions",
+      "supplements",
+      "allergies",
+      "common conditions",
+      "self care"
+    ],
+    "summary": "MOH describes pharmacists as healthcare partners who can advise on medication use, side effects, storage, and possible food, medicine, supplement, or traditional-medicine interactions. Pharmacists can also advise on managing common health conditions.",
+    "guidance": [
+      "Tell the pharmacist about allergies, other medical conditions, and medicines you are taking when seeking medication advice.",
+      "Ask a pharmacist about a medicine's purpose, how to take it, common side effects, storage, and relevant precautions."
+    ],
+    "last_reviewed": "2026-08-14"
+  },
+  {
+    "id": "moh-seeking-a-doctor",
+    "title": "Seeking a doctor",
+    "agency": "Ministry of Health Singapore",
+    "url": "https://www.moh.gov.sg/seeking-healthcare/getting-medical-help/seeking-a-doctor/",
+    "topics": [
+      "doctor",
+      "general practitioner",
+      "GP",
+      "GP clinic",
+      "polyclinic",
+      "primary care",
+      "mild symptoms",
+      "moderate symptoms",
+      "referral",
+      "emergency department"
+    ],
+    "summary": "MOH advises that GPs can treat many conditions and that people with mild-to-moderate health problems should consider seeing a GP first, allowing Emergency Departments to focus on more urgent cases. A GP can assess the problem and refer onward when appropriate.",
+    "guidance": [
+      "A GP can assess symptoms, advise on next steps, and decide whether referral, tests, or more urgent care are appropriate.",
+      "Do not use this general GP-first guidance to delay emergency care when emergency warning signs are present."
+    ],
+    "last_reviewed": "2026-08-14"
+  },
+  {
+    "id": "moh-hospital-emergencies",
+    "title": "When to visit the hospital for emergencies",
+    "agency": "Ministry of Health Singapore",
+    "url": "https://www.moh.gov.sg/seeking-healthcare/getting-medical-help/visiting-the-hospital-for-emergencies/",
+    "topics": [
+      "emergency",
+      "hospital emergency",
+      "emergency department",
+      "severe pain",
+      "chest pain",
+      "breathing difficulty",
+      "uncontrolled bleeding",
+      "confusion",
+      "weakness",
+      "vision change",
+      "vomiting blood",
+      "continuous vomiting",
+      "diarrhoea"
+    ],
+    "summary": "MOH describes a medical emergency as a sudden illness requiring immediate attention. Its warning signs include sudden or severe pain, breathing difficulty, uncontrolled bleeding, sudden confusion, sudden dizziness, numbness, weakness or vision change, coughing or vomiting blood, and continuous vomiting or diarrhoea.",
+    "guidance": [
+      "Seek immediate medical attention for a possible medical emergency.",
+      "Keep identification, a current medicine list, and relevant contact details available when preparing for an emergency."
+    ],
+    "last_reviewed": "2026-08-14"
+  },
+  {
+    "id": "nuhs-find-a-condition",
+    "title": "Find a Condition",
+    "agency": "National University Health System",
+    "source_type": "Supplementary provider education",
+    "url": "https://www.nuhs.edu.sg/patient-care/find-a-condition",
+    "topics": [
+      "condition",
+      "disease",
+      "medical condition",
+      "symptoms",
+      "treatment",
+      "patient education",
+      "NUHS"
+    ],
+    "summary": "NUHS provides a searchable directory of diseases and conditions treated at its institutions. NUHS notes that the directory is a guide and not a complete list of conditions treated.",
+    "guidance": [
+      "Use the directory to find relevant patient-education material or a treating institution, not to self-diagnose.",
+      "The directory does not establish that a person has a condition or that a particular treatment is appropriate."
+    ],
+    "last_reviewed": "2026-08-14"
+  },
+  {
+    "id": "singhealth-conditions",
+    "title": "Symptoms & Medical Conditions",
+    "agency": "SingHealth",
+    "source_type": "Supplementary provider education",
+    "url": "https://www.singhealth.com.sg/symptoms-treatments/symptoms-treatments-medical-conditions",
+    "topics": [
+      "condition",
+      "disease",
+      "symptoms",
+      "causes",
+      "diagnosis",
+      "treatment",
+      "medical condition",
+      "patient education",
+      "SingHealth"
+    ],
+    "summary": "SingHealth provides an A-Z and body-region directory of patient information on symptoms and medical conditions, including information categories such as symptoms, causes, diagnosis, and treatments.",
+    "guidance": [
+      "Use condition pages as general patient education and discuss symptoms, tests, and treatment choices with a qualified clinician.",
+      "A condition directory cannot diagnose an individual or replace professional medical advice."
+    ],
+    "last_reviewed": "2026-08-14"
+  },
+  {
+    "id": "mount-elizabeth-conditions",
+    "title": "Conditions & Diseases",
+    "agency": "Mount Elizabeth Hospitals",
+    "source_type": "Supplementary provider education",
+    "url": "https://www.mountelizabeth.com.sg/conditions-diseases",
+    "topics": [
+      "condition",
+      "disease",
+      "symptoms",
+      "treatment",
+      "procedure",
+      "patient education",
+      "Mount Elizabeth"
+    ],
+    "summary": "Mount Elizabeth Hospitals provides a Conditions & Diseases directory as supplementary patient education.",
+    "guidance": [
+      "Use this directory to locate general educational material, not as a diagnosis or individual treatment recommendation."
+    ],
+    "last_reviewed": "2026-08-14"
+  },
+  {
+    "id": "gleneagles-conditions",
+    "title": "Conditions & Diseases",
+    "agency": "Gleneagles Hospital Singapore",
+    "source_type": "Supplementary provider education",
+    "url": "https://www.gleneagles.com.sg/conditions-diseases",
+    "topics": [
+      "condition",
+      "disease",
+      "symptoms",
+      "treatment",
+      "procedure",
+      "patient education",
+      "Gleneagles"
+    ],
+    "summary": "Gleneagles Hospital Singapore provides a Conditions & Diseases directory as supplementary patient education.",
+    "guidance": [
+      "Use this directory to locate general educational material, not as a diagnosis or individual treatment recommendation."
+    ],
+    "last_reviewed": "2026-08-14"
+  },
+  {
     "id": "scdf-emergency-medical-services",
     "title": "Emergency Medical Services",
     "agency": "Singapore Civil Defence Force",

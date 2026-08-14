@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hmac
+import re
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -28,7 +31,33 @@ from utils.benchmark_rag import (
 
 APP_TITLE = "CareCost Navigator"
 DATA_PATH = Path(__file__).parent / "data" / "feebenchmarks.xlsx"
+HOSPITAL_BILLS_PATH = Path(__file__).parent / "data" / "hospitalbillsizes.xlsx"
 MOH_SOURCE_URL = "https://www.moh.gov.sg/managing-expenses/bills-and-fee-benchmarks/hospital-bills-and-fee-benchmarks/"
+HOSPITAL_NAMES = {
+    "ADMC": "Admiralty Medical Centre",
+    "AH": "Alexandra Hospital",
+    "CGH": "Changi General Hospital",
+    "FPH": "Farrer Park Hospital",
+    "GEH": "Gleneagles Hospital",
+    "JMC": "Jurong Medical Centre",
+    "KKH": "KK Women's and Children's Hospital",
+    "KTPH": "Khoo Teck Puat Hospital",
+    "MAH": "Mount Alvernia Hospital",
+    "MEH": "Mount Elizabeth Hospital",
+    "MNH": "Mount Elizabeth Novena Hospital",
+    "NCC": "National Cancer Centre Singapore",
+    "NHC": "National Heart Centre Singapore",
+    "NSC": "National Skin Centre",
+    "NTFGH": "Ng Teng Fong General Hospital",
+    "NUH": "National University Hospital",
+    "PEH": "Parkway East Hospital",
+    "RH": "Raffles Hospital",
+    "SGH": "Singapore General Hospital",
+    "SKH": "Sengkang General Hospital",
+    "SNEC": "Singapore National Eye Centre",
+    "TMC": "Thomson Medical Centre",
+    "TTSH": "Tan Tock Seng Hospital",
+}
 
 
 @dataclass(frozen=True)
@@ -63,6 +92,20 @@ def load_benchmark_index(
 def workbook_summary(path: str) -> tuple[int, int]:
     records = load_benchmark_records(path)
     return len(records), len({record.sheet for record in records})
+
+
+@st.cache_data(show_spinner=False)
+def hospital_bill_filter_options(path: str) -> tuple[list[str], list[str]]:
+    if not Path(path).exists():
+        return [], []
+    records = load_benchmark_records(path)
+    hospitals = sorted({record.fields.get("hospital", "") for record in records if record.fields.get("hospital", "")})
+    wards = sorted({record.fields.get("ward_type", "") for record in records if record.fields.get("ward_type", "")})
+    return hospitals, wards
+
+
+def format_hospital_option(abbreviation: str) -> str:
+    return f"{HOSPITAL_NAMES.get(abbreviation, abbreviation)} ({abbreviation})"
 
 
 def require_access() -> None:
@@ -139,6 +182,16 @@ def get_benchmark_index(settings: ModelSettings) -> BenchmarkIndex:
     )
 
 
+def get_hospital_bill_index(settings: ModelSettings) -> BenchmarkIndex | None:
+    if not HOSPITAL_BILLS_PATH.exists():
+        return None
+    provider = settings.provider if settings.semantic_search else ""
+    api_key = settings.api_key if settings.semantic_search else ""
+    return load_benchmark_index(
+        str(HOSPITAL_BILLS_PATH), provider, api_key, settings.base_url, settings.embedding_model
+    )
+
+
 def initialize_chat_state(prefix: str) -> None:
     defaults = {
         f"{prefix}_messages": [],
@@ -159,20 +212,34 @@ def clear_chat_state(prefix: str) -> None:
     initialize_chat_state(prefix)
 
 
-def render_chat_messages(messages: list[dict[str, str]]) -> None:
+def render_chat_messages(messages: list[dict[str, object]]) -> None:
     if not messages:
         st.info("Ask a question to start this use case.")
         return
     for message in messages:
         with st.chat_message(message.get("role", "assistant")):
-            st.markdown(message.get("content", ""))
+            content = str(message.get("content", ""))
+            if message.get("cost_matches"):
+                split = re.split(r"(?im)^#{2,3}\s*cost explanations\s*$", content, maxsplit=1)
+                st.markdown(split[0])
+                st.markdown("##### Grounded cost alternatives")
+                render_cost_dashboard(
+                    message["cost_matches"],  # type: ignore[arg-type]
+                    message.get("hospital_bill_matches", []),  # type: ignore[arg-type]
+                )
+                if len(split) == 2:
+                    st.markdown("### Cost explanations\n" + split[1].lstrip())
+            else:
+                st.markdown(content)
 
 WORKFLOW_PROGRESS_STEPS = (
+    ("semantic_index", "Preparing semantic retrieval"),
     ("planner", "Planning"),
     ("safety_check", "Safety check"),
     ("mesh_rag", "MeSH terminology search"),
     ("official_source_lookup", "Official source lookup"),
     ("benchmark_search", "Fee benchmark search"),
+    ("hospital_bill_search", "Hospital stay bill-size search"),
     ("missing_information_check", "Checking for missing information"),
     ("answer_composer", "Preparing answer"),
     ("quality_evaluator", "Evaluating answer"),
@@ -291,6 +358,28 @@ def render_match_table(matches: list[tuple[BenchmarkRecord, float]]) -> None:
     st.dataframe(match_rows(matches), hide_index=True, use_container_width=True)
 
 
+def render_hospital_bill_table(matches: list[tuple[BenchmarkRecord, float]]) -> None:
+    if not matches:
+        st.info("No hospital bill-size rows matched the selected details.")
+        return
+    rows = []
+    for record, score in matches:
+        rows.append({
+            "relevance": score,
+            "procedure_or_diagnosis": first_matching_field(record, ("tosp_description", "drg_description", "description")),
+            "hospital": record.fields.get("hospital", "All participating hospitals"),
+            "setting": record.fields.get("setting", ""),
+            "ward_type": record.fields.get("ward_type", ""),
+            "average_length_of_stay_days": record.fields.get("alos", ""),
+            "p25_bill_sgd": record.fields.get("p25_bill", ""),
+            "p50_bill_sgd": record.fields.get("p50_bill", ""),
+            "p75_bill_sgd": record.fields.get("p75_bill", ""),
+            "source_sheet": record.sheet,
+            "source_row": record.row_number,
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
 def render_match_chart(matches: list[tuple[BenchmarkRecord, float]]) -> None:
     frame = match_rows(matches)
     if frame.empty:
@@ -299,18 +388,203 @@ def render_match_chart(matches: list[tuple[BenchmarkRecord, float]]) -> None:
     if chart.empty:
         st.caption("The matched rows do not expose a lower/upper amount pair that can be charted.")
         return
-    chart["benchmark"] = chart["benchmark"].fillna(chart["workbook_sheet"]).str.slice(0, 70)
-    st.bar_chart(chart.set_index("benchmark")[["lower_sgd", "upper_sgd"]])
+    chart["benchmark"] = chart["benchmark"].fillna(chart["workbook_sheet"])
+    chart["benchmark_label"] = chart["benchmark"].map(_wrap_chart_label)
+    chart["range"] = chart.apply(
+        lambda row: f"SGD {row['lower_sgd']:,.0f} – SGD {row['upper_sgd']:,.0f}", axis=1
+    )
+    labels = chart["benchmark_label"].tolist()
+    range_chart = (
+        alt.Chart(chart)
+        .mark_bar(color="#5B8FF9")
+        .encode(
+            y=alt.Y(
+                "benchmark_label:N",
+                sort=labels,
+                title=None,
+                axis=alt.Axis(labelLimit=0, labelPadding=8, labelFontSize=12, labelLineHeight=15),
+            ),
+            x=alt.X("lower_sgd:Q", title="Fee benchmark (SGD)", axis=alt.Axis(format=",d")),
+            x2="upper_sgd:Q",
+            tooltip=[
+                alt.Tooltip("benchmark:N", title="Benchmark"),
+                alt.Tooltip("lower_sgd:Q", title="Lower (SGD)", format=",.0f"),
+                alt.Tooltip("upper_sgd:Q", title="Upper (SGD)", format=",.0f"),
+                alt.Tooltip("workbook_sheet:N", title="Workbook sheet"),
+                alt.Tooltip("range:N", title="Range"),
+            ],
+        )
+        .properties(height=max(260, 48 * len(chart)))
+    )
+    st.altair_chart(range_chart, use_container_width=True)
     st.caption("Chart values are reference ranges from matched workbook rows, not predicted bills.")
 
 
+def _field_amount(value: str) -> int | None:
+    match = re.search(r"\d[\d,]*", str(value))
+    return int(match.group(0).replace(",", "")) if match else None
+
+
+def _wrap_chart_label(value: str, width: int = 42) -> str:
+    return "\n".join(textwrap.wrap(str(value), width=width, break_long_words=False, break_on_hyphens=False))
+
+
+def _compact_dashboard_label(value: str) -> str:
+    compact = re.split(r"\bfootnote\s*:", str(value), maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    if len(compact) > 150:
+        compact = compact[:147].rsplit(" ", 1)[0] + "…"
+    return _wrap_chart_label(compact, width=38)
+
+
+def _fee_components(record: BenchmarkRecord) -> list[tuple[str, int, int]]:
+    pairs: list[tuple[int, str, int, int]] = []
+    for key, value in record.fields.items():
+        match = re.fullmatch(r"lower_bound(?:_(\d+))?", key)
+        if not match:
+            continue
+        suffix = match.group(1)
+        upper_key = f"upper_bound_{suffix}" if suffix else "upper_bound"
+        lower, upper = _field_amount(value), _field_amount(record.fields.get(upper_key, ""))
+        if lower is not None and upper is not None:
+            pairs.append((int(suffix or 1), key, lower, upper))
+    if not pairs:
+        lower, upper = estimate_amounts(record)
+        return [("Fee benchmark", lower, upper)] if lower is not None and upper is not None else []
+    labels = ["Surgeon fee", "Anaesthetist fee"] if "Surg & Ana" in record.sheet else ["Hospital fee"]
+    return [
+        (labels[index] if index < len(labels) else f"Fee component {index + 1}", lower, upper)
+        for index, (_, _, lower, upper) in enumerate(sorted(pairs))
+    ]
+
+
+def render_cost_dashboard(
+    fee_matches: list[tuple[BenchmarkRecord, float]],
+    stay_matches: list[tuple[BenchmarkRecord, float]],
+) -> None:
+    """Show each retrieved procedure as an alternative, component-stacked lower/upper scenario."""
+    scenarios: list[dict[str, object]] = []
+    if stay_matches:
+        p25_values = [_field_amount(record.fields.get("p25_bill", "")) for record, _ in stay_matches]
+        p75_values = [_field_amount(record.fields.get("p75_bill", "")) for record, _ in stay_matches]
+        p25_values, p75_values = [value for value in p25_values if value is not None], [value for value in p75_values if value is not None]
+        stay_lower, stay_upper = (min(p25_values) if p25_values else None), (max(p75_values) if p75_values else None)
+    else:
+        stay_lower = stay_upper = None
+    for record, _ in fee_matches[:10]:
+        components = _fee_components(record)
+        if not components:
+            continue
+        scenario = first_matching_field(record, ("description", "drg_description", "ccs", "tosp")) or record.sheet
+        scenario = f"{scenario} ({record.fields.get('tosp') or record.fields.get('drg') or record.sheet})"
+        for label, lower, upper in components:
+            scenarios.extend((
+                {"scenario": scenario, "estimate": "Lower total", "component": label, "amount": lower},
+                {"scenario": scenario, "estimate": "Upper total", "component": label, "amount": upper},
+            ))
+        if stay_lower is not None and stay_upper is not None:
+            scenarios.extend((
+                {"scenario": scenario, "estimate": "Lower total", "component": "Hospital stay bill (P25)", "amount": stay_lower},
+                {"scenario": scenario, "estimate": "Upper total", "component": "Hospital stay bill (P75)", "amount": stay_upper},
+            ))
+    if not scenarios:
+        st.info("No component ranges were available to build a dashboard.")
+        return
+    frame = pd.DataFrame(scenarios)
+    scenario_order = list(dict.fromkeys(frame["scenario"]))
+    scenario_ids = {scenario: str(index + 1) for index, scenario in enumerate(scenario_order)}
+    frame["scenario_id"] = frame["scenario"].map(scenario_ids)
+    frame["scenario_short"] = frame["scenario"].map(
+        lambda value: re.sub(r"\s+", " ", re.split(r"\bfootnote\s*:", str(value), maxsplit=1, flags=re.IGNORECASE)[0]).strip()[:180]
+    )
+    frame["component_bound"] = frame["component"] + " · " + frame["estimate"]
+    component_order = list(dict.fromkeys(frame["component_bound"]))
+
+    def component_color(row: pd.Series) -> str:
+        is_lower = row["estimate"] == "Lower total"
+        component = row["component"]
+        if "stay bill" in component:
+            return "#9ECAE1" if is_lower else "#3182BD"
+        if "surgeon" in component.lower():
+            return "#A9C5F5" if is_lower else "#5B8FF9"
+        if "anaesthetist" in component.lower():
+            return "#BDEEDC" if is_lower else "#61DDAA"
+        if "hospital" in component.lower():
+            return "#C7D0DF" if is_lower else "#65789B"
+        return "#C9D9F8" if is_lower else "#4E79D9"
+
+    component_colors = [
+        component_color(frame.loc[frame["component_bound"] == component].iloc[0])
+        for component in component_order
+    ]
+    maximum_total = frame.groupby(["scenario", "estimate"])["amount"].sum().max() * 1.12
+    for scenario in scenario_order:
+        scenario_frame = frame[frame["scenario"] == scenario]
+        st.markdown(f"#### Alternative {scenario_ids[scenario]}")
+        st.write(_compact_dashboard_label(scenario).replace("\n", " "))
+        base_chart = alt.Chart()
+        bars = (
+            base_chart
+            .mark_bar()
+            .encode(
+                y=alt.Y("estimate:N", sort=["Upper total", "Lower total"], title=None, axis=alt.Axis(labelFontSize=12, labelPadding=10)),
+                x=alt.X("sum(amount):Q", title="Combined reference amount (SGD)", scale=alt.Scale(domain=[0, maximum_total]), axis=alt.Axis(format=",d")),
+                color=alt.Color("component_bound:N", legend=None, scale=alt.Scale(domain=component_order, range=component_colors)),
+                tooltip=[
+                    alt.Tooltip("scenario_short:N", title="Alternative"),
+                    alt.Tooltip("estimate:N", title="Total type"),
+                    alt.Tooltip("component:N", title="Component"),
+                    alt.Tooltip("amount:Q", title="Amount (SGD)", format=",.0f"),
+                ],
+            )
+            .properties(height=120)
+        )
+        total_labels = (
+            base_chart
+            .transform_aggregate(total_amount="sum(amount)", groupby=["estimate"])
+            .transform_calculate(total_label="'SGD ' + format(datum.total_amount, ',.0f')")
+            .mark_text(align="left", baseline="middle", dx=6, fontSize=11, color="#333333")
+            .encode(y=alt.Y("estimate:N", sort=["Upper total", "Lower total"], axis=None), x=alt.X("total_amount:Q"), text="total_label:N")
+        )
+        st.altair_chart(alt.layer(bars, total_labels, data=scenario_frame), use_container_width=True)
+        legend_groups: dict[str, dict[str, str]] = {}
+        for component, color in zip(component_order, component_colors):
+            component_name, bound = component.rsplit(" · ", 1)
+            short_name = re.sub(r"\s*\(P(?:25|75)\)", "", component_name)
+            legend_groups.setdefault(short_name, {})[bound] = color
+        legend_columns = st.columns(4)
+        for column, (name, shades) in zip(legend_columns, legend_groups.items()):
+            with column:
+                for bound in ("Upper total", "Lower total"):
+                    if bound in shades:
+                        short_bound = "Upper" if bound == "Upper total" else "Lower"
+                        st.markdown(
+                            f"<span style='color:{shades[bound]}; font-size:1.25rem'>■</span> {name} · {short_bound}",
+                            unsafe_allow_html=True,
+                        )
+        st.markdown("<div style='height: 1.5rem'></div>", unsafe_allow_html=True)
+    alternatives = pd.DataFrame(
+        {"alternative": [scenario_ids[scenario] for scenario in scenario_order], "procedure or condition": scenario_order}
+    )
+    with st.expander("Alternative procedure names", expanded=False):
+        st.dataframe(alternatives, hide_index=True, use_container_width=True)
+    totals = frame.groupby(["scenario", "estimate"], as_index=False)["amount"].sum().pivot(
+        index="scenario", columns="estimate", values="amount"
+    ).reset_index()
+    st.dataframe(totals, hide_index=True, use_container_width=True)
+    st.caption(
+        "Each row is an alternative retrieved procedure/condition scenario. Lower totals use P25 and upper totals use P75 "
+        "for retrieved hospital-stay bills. These are assembled reference amounts, not a quote or prediction; confirm which "
+        "components apply and request an itemised estimate from the provider."
+    )
+
+
 def render_sources(sources: list[OfficialSource]) -> None:
-    with st.expander("Official sources used", expanded=False):
+    with st.expander("Curated sources used", expanded=False):
         if not sources:
             st.write("No source was selected for this turn.")
             return
         for source in sources:
-            st.markdown(f"**[{source.title}]({source.url})** — {source.agency}")
+            st.markdown(f"**[{source.title}]({source.url})** — {source.agency} · {source.source_type}")
             st.write(source.summary)
             st.caption(f"Curated source record last reviewed: {source.last_reviewed}")
 

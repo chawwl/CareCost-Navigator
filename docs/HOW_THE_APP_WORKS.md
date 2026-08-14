@@ -1,6 +1,6 @@
 # How CareCost Navigator Works
 
-This document explains the runtime architecture of CareCost Navigator, with particular focus on the agentic workflow in [`agentic_workflow.py`](../agentic_workflow.py) and the fee benchmark retrieval pipeline in [`utils/benchmark_rag.py`](../utils/benchmark_rag.py).
+This document explains the runtime architecture of CareCost Navigator, with particular focus on the agentic workflow in [`agentic_workflow.py`](../agentic_workflow.py), the shared workbook retrieval pipeline in [`utils/benchmark_rag.py`](../utils/benchmark_rag.py), and the deliberate separation between care navigation and known-item cost lookup.
 
 It is intended for project assessors, maintainers, and developers who want to understand how a user request becomes a grounded answer.
 
@@ -8,8 +8,8 @@ It is intended for project assessors, maintainers, and developers who want to un
 
 CareCost Navigator is a multi-page Streamlit application with two main use cases:
 
-1. **Care Pathway Guide** - accepts a conversational question about symptoms, diagnoses, or procedures and produces a non-diagnostic explanation, safety guidance, official sources, and questions to discuss with a clinician.
-2. **Fee Benchmark Explorer** - accepts a procedure, diagnosis, or TOSP code through a guided form and retrieves relevant rows from the Singapore MOH fee benchmark workbook. It presents a grounded explanation, evidence table, and lower/upper range chart.
+1. **Care Pathway Guide** - accepts a conversational symptom or known-condition question. It combines safety screening, MeSH terminology expansion, curated official sources, and an LLM to provide non-diagnostic general education, including common symptoms and care options a clinician may discuss.
+2. **Fee Benchmark Explorer** - accepts a known procedure, diagnosis, or TOSP code through a guided form. It searches the MOH fee benchmark workbook and, separately, the hospital bill-size workbook; it can narrow hospital-stay rows by hospital and ward type.
 
 The app is educational. It does not diagnose, select treatment, determine insurance coverage, or guarantee a final bill.
 
@@ -24,7 +24,8 @@ The app is educational. It does not diagnose, select treatment, determine insura
 | [`agentic_workflow.py`](../agentic_workflow.py) | Model-provider clients, workflow state, planning, tools, answer composition, evaluation, revision, and retrieval-only fallback. |
 | [`utils/benchmark_rag.py`](../utils/benchmark_rag.py) | Workbook ingestion, normalisation, chunking, BM25/vector indexing, query expansion, retrieval, reranking, and context assembly. |
 | [`data/feebenchmarks.xlsx`](../data/feebenchmarks.xlsx) | Local MOH fee benchmark workbook searched by the application. |
-| [`data/official_sources.json`](../data/official_sources.json) | Curated allowlist of official MOH and SCDF guidance used by the source lookup tool. |
+| [`data/hospitalbillsizes.xlsx`](../data/hospitalbillsizes.xlsx) | Local MOH hospital bill-size workbook searched independently for stay-cost evidence. |
+| [`data/official_sources.json`](../data/official_sources.json) | Curated allowlist of official MOH and SCDF guidance used by the source lookup tool, including condition, pharmacist, doctor, and emergency-care pages. |
 
 ## 3. Overall architecture
 
@@ -36,18 +37,25 @@ flowchart LR
 
     W --> P[Constrained planner]
     P --> T1[Safety tool]
-    P --> T2[Official-source tool]
-    P --> T3[Benchmark-search tool]
-    P --> T4[Missing-information tool]
+    P --> T2[MeSH terminology tool]
+    P --> T3[Official-source tool]
+    P --> T4[Fee benchmark-search tool]
+    P --> T5[Hospital bill-size search tool]
+    P --> T6[Missing-information tool]
 
-    T2 --> O[(Curated official sources)]
-    T3 --> R[Benchmark RAG pipeline]
-    R --> X[(MOH workbook)]
+    T2 --> M[(NLM MeSH service)]
+    T3 --> O[(Curated official sources)]
+    T4 --> R[Fee benchmark RAG]
+    T5 --> H[Hospital bill-size RAG]
+    R --> X[(feebenchmarks.xlsx)]
+    H --> Y[(hospitalbillsizes.xlsx)]
 
     T1 --> C[Answer composer]
     T2 --> C
     T3 --> C
     T4 --> C
+    T5 --> C
+    T6 --> C
     C --> E[Quality evaluator]
     E -->|Pass| A[Final answer]
     E -->|Fail| V[One bounded revision]
@@ -58,7 +66,7 @@ flowchart LR
 There are two related but separate systems:
 
 - The **agentic workflow** decides what actions are needed, executes constrained tools, stores their observations, composes the answer, and evaluates it.
-- The **benchmark RAG pipeline** is one of those tools. It retrieves and reranks workbook records but does not itself write the final natural-language response.
+- The **workbook RAG pipeline** is used by two separate tools. Each retrieves and reranks records from its own workbook but does not itself write the final natural-language response.
 
 ## 4. How the Streamlit pages call the workflow
 
@@ -68,27 +76,29 @@ The page performs the following sequence:
 
 1. Initialises namespaced Streamlit session keys for messages, workflow steps, matches, sources, safety flags, and mode.
 2. Renders provider, model, API key, and compatible-endpoint settings.
-3. Builds or reuses the cached benchmark index. Semantic retrieval is enabled by default for OpenAI and OpenAI-compatible providers: when an API key is available, the index combines BM25 with an in-memory embedding store; without a key, it remains BM25-only.
+3. Builds or reuses the cached benchmark index used for compatible workflow calls. When explicitly enabled for OpenAI or OpenAI-compatible providers, semantic retrieval adds an in-memory embedding store; otherwise retrieval remains BM25-only.
 4. Accepts a message through `st.chat_input`.
 5. Copies the existing conversation before adding the new turn.
 6. Creates an `LLMClient` and calls `run_agent_workflow` with the fixed mode `Condition to procedures`.
 7. Saves the returned answer, trace, sources, safety flags, and other state.
 8. Renders the conversation and expandable workflow trace.
 
-Recent conversation is useful when a user supplies a short follow-up such as “day surgery” or “doctor fees only.”
+Recent conversation is useful when a user supplies a short follow-up. Cost-specific questions are better handled in Fee Benchmark Explorer.
 
 ### 4.2 Fee Benchmark Explorer
 
 The fee page performs a similar sequence, but starts from a form:
 
 1. The user enters a procedure, diagnosis, or TOSP code.
-2. The user selects a care setting and fee component.
-3. The page combines those fields into a workflow question while retaining the raw procedure/diagnosis field as a separate retrieval anchor.
-4. The benchmark index is loaded after form submission.
-5. If semantic retrieval is enabled and an OpenAI or compatible key is available, the cached index includes both BM25 and an in-memory vector store. Otherwise it remains BM25-only.
-6. `run_agent_workflow` is called with the fixed mode `Procedure cost estimate`. Each form submission is independent and does not reuse a previous fee search as conversation history.
-7. The returned benchmark matches are converted to a DataFrame.
-8. The UI displays the answer, source sheet and row, retrieval score, parsed lower/upper amounts, and a bar chart for rows that contain usable amount fields.
+2. The user selects a care setting, fee component, hospital, and ward type.
+3. Symptom-only input is redirected to Care Pathway Guide; Fee Benchmark Explorer is reserved for a known procedure, diagnosis, or TOSP code.
+4. The page combines the fields into a workflow question. Hospital labels are shown as `Full Name (ABBREVIATION)` and the abbreviation is retained for exact filtering.
+5. The fee benchmark and hospital bill-size indexes are loaded independently after form submission.
+6. If semantic retrieval is enabled and an OpenAI or compatible key is available, each cached index includes both BM25 and an in-memory vector store. Otherwise it remains BM25-only.
+7. `run_agent_workflow` is called with the fixed mode `Procedure cost estimate`, MeSH disabled, and the separate hospital bill-size index. Each form submission is independent.
+8. The UI displays fee-benchmark rows and hospital-stay bill-size rows in separate tables, plus the fee-benchmark range chart.
+
+For cost-related messages in Care Pathway Guide, the route switches to `Both` and renders the same alternative-procedure, component-stacked lower/upper chart directly beneath the assistant reply. A lower total uses P25 and an upper total uses P75 for any retrieved stay-bill component. The chart is an assembled reference view, not an itemised quotation or a prediction of an individual bill.
 
 ### 4.3 Cached resources
 
@@ -124,7 +134,9 @@ One orchestrator manages a transparent state machine and calls specialist tools.
 | `conversation_history` | Bounded recent context. |
 | `safety` | Prompt-injection flags, emergency flags, and truncation status. |
 | `plan` | Validated workflow mode, ordered tools, rationale, and planner source. |
-| `matches` | Retrieved MOH benchmark rows and scores. |
+| `matches` | Retrieved MOH fee-benchmark rows and scores. |
+| `hospital_bill_matches` | Retrieved hospital bill-size rows and scores. |
+| `hospital_filter` / `ward_filter` | Selected abbreviations/ward values used to filter hospital bill-size results. |
 | `sources` | Curated official sources selected for the question. |
 | `follow_up_questions` | Missing details detected by deterministic rules. |
 | `observations` | Text returned by each executed tool. |
@@ -171,7 +183,7 @@ The model does not have final authority over the plan. `parse_planner_output` ap
 2. A valid mode explicitly requested by the page is retained.
 3. Unknown tool names are discarded.
 4. `safety_check`, `official_source_lookup`, and `missing_information_check` are always restored.
-5. `benchmark_search` is always restored for fee or combined modes.
+5. `benchmark_search` and `hospital_bill_search` are restored for fee or combined modes when the relevant workbook index is available.
 6. Tools are placed in a fixed safe execution order.
 7. The rationale is capped at 500 characters.
 
@@ -181,7 +193,7 @@ This is an important safeguard: the LLM can propose a plan, but code determines 
 
 ### 5.6 Tool execution
 
-Only four tools are allowlisted.
+The workflow uses six allowlisted retrieval and safety tools. MeSH is used for Care Pathway Guide requests; the Fee Benchmark Explorer deliberately disables it because its input is already a known procedure, diagnosis, or code.
 
 #### `safety_check`
 
@@ -193,6 +205,10 @@ Returns observations about:
 
 This observation is supplied to the answer composer. A deterministic post-processing check also adds a 995 notice when emergency flags exist and the model omitted it.
 
+#### `mesh_rag`
+
+For a care-pathway question, this tool queries the U.S. National Library of Medicine's MeSH terminology service and retains relevant concepts as terminology support for the workflow. It is a vocabulary-retrieval aid, not a diagnostic tool: a weak or absent MeSH match does not mean the user's concern is invalid, and it does not prevent the app from giving appropriately bounded general education.
+
 #### `official_source_lookup`
 
 Loads the local curated source registry and scores sources by token overlap. It also applies mode-aware boosts:
@@ -203,9 +219,19 @@ Loads the local curated source registry and scores sources by token overlap. It 
 
 At most three positive-scoring sources are returned. The model is instructed to cite only these supplied URLs.
 
+The registry includes MOH's [Conditions](https://www.moh.gov.sg/seeking-healthcare/getting-medical-help/conditions/), [Visiting a pharmacist](https://www.moh.gov.sg/seeking-healthcare/getting-medical-help/visiting-a-pharmacist/), [Seeking a doctor](https://www.moh.gov.sg/seeking-healthcare/getting-medical-help/seeking-a-doctor/), and [When to visit the hospital for emergencies](https://www.moh.gov.sg/seeking-healthcare/getting-medical-help/visiting-the-hospital-for-emergencies/) pages. It also includes condition directories from [NUHS](https://www.nuhs.edu.sg/patient-care/find-a-condition), [SingHealth](https://www.singhealth.com.sg/symptoms-treatments/symptoms-treatments-medical-conditions), [Mount Elizabeth](https://www.mountelizabeth.com.sg/conditions-diseases), and [Gleneagles](https://www.gleneagles.com.sg/conditions-diseases) as **Supplementary provider education**. Deterministic scoring favours the conditions directory for care-pathway requests and boosts the pharmacist, GP/doctor, or hospital-emergency page when the query indicates that specific need.
+
+Source type is carried into prompt context and the UI. The composer must not treat a generic directory as evidence that a user has a named condition, or as direct support for condition-specific facts, symptoms, or treatment options that do not appear in the supplied source summary.
+
+For a named condition, the source tool also attempts a bounded lookup of the condition-specific page under the selected provider directories. It generates only fixed, allowlisted directory URL patterns, uses a short timeout, accepts a response only from the expected host, and replaces a directory entry with the successfully retrieved condition page. If no exact page is found, the directory remains supplementary navigation rather than condition-specific evidence.
+
 #### `benchmark_search`
 
-Builds a retrieval query from the current question and any conversation history supplied by the calling page, then calls `search_benchmark_records`. The Fee Benchmark Explorer also supplies its raw procedure/diagnosis field as a dedicated anchor, so care-setting labels and earlier form submissions cannot become clinical search terms. The result is stored in `state.matches` and serialised into the tool observation.
+Builds a retrieval query from the current question and relevant conversation history, then calls `search_benchmark_records` against `feebenchmarks.xlsx`. The result is stored in `state.matches` and serialised into the tool observation. Fee statements must be grounded in these rows.
+
+#### `hospital_bill_search`
+
+Calls the same bounded retrieval/reranking method against the independently indexed `hospitalbillsizes.xlsx` workbook. It then applies exact hospital and ward-type filters selected in the form. The matching rows are stored in `state.hospital_bill_matches` and separately supplied to the composer. These rows can expose P25, P50, P75, and ALOS fields when the workbook contains them.
 
 The full retrieval pipeline is explained in Section 6.
 
@@ -227,16 +253,18 @@ When a model key is available, the composer receives:
 - the validated workflow mode;
 - the bounded user question and recent conversation;
 - selected official-source summaries and URLs;
-- retrieved benchmark rows and scores;
+- retrieved fee-benchmark rows and scores;
+- retrieved hospital bill-size rows and scores;
 - the safety observation; and
 - the missing-information observation.
 
 The system prompt requires the model to:
 
 - treat user and retrieved text as untrusted data;
-- avoid diagnosis and prescribing;
+- avoid diagnosis, prescribing, and individualised treatment recommendations;
+- for a named condition, provide a clearly labelled general overview of common symptoms and care options a clinician may discuss;
 - ground emergency guidance in supplied official sources;
-- ground cost statements in supplied workbook rows;
+- ground cost statements in the supplied fee-benchmark or hospital bill-size rows;
 - avoid inventing fees, coverage, subsidies, or sources;
 - separate hospital fees from professional fees; and
 - describe benchmark values as reference ranges rather than quotes.
@@ -257,8 +285,8 @@ The draft is passed to a second model prompt acting as a quality evaluator. It m
 
 The evaluator is asked to fail answers that:
 
-- diagnose;
-- contain unsupported healthcare or cost claims;
+- diagnose, prescribe, or make individualised treatment claims;
+- contain unsupported cost claims;
 - omit emergency escalation when flags exist;
 - treat benchmark ranges as guaranteed prices;
 - follow prompt-injection content; or
@@ -274,12 +302,12 @@ When no API key is configured:
 
 1. Planning uses deterministic policy routing.
 2. All planned local tools still run.
-3. BM25 benchmark retrieval remains available.
+3. BM25 retrieval remains available for each local workbook index.
 4. Official-source lookup and missing-information checks remain available.
 5. `build_retrieval_only_answer` generates a template-based response.
 6. No LLM planning, composition, evaluation, or revision call is made.
 
-This means the Fee Benchmark Explorer can still return traceable workbook matches without sending a request to a model provider. The Care Pathway Guide provides official guidance but explains that a model key is needed for a tailored narrative.
+This means Fee Benchmark Explorer can still return traceable fee-benchmark and hospital bill-size matches without sending a request to a model provider. Care Pathway Guide provides official guidance but needs a model key for tailored named-condition education.
 
 ### 5.10 Agent trace
 
@@ -292,9 +320,9 @@ Every completed stage appends an `AgentStep` containing:
 
 The UI exposes this in the **Agent workflow trace** expander. The trace is useful for explaining why a route or tool was selected and whether the evaluator requested a revision.
 
-## 6. The fee benchmark RAG pipeline
+## 6. The workbook RAG pipelines
 
-RAG means **retrieval-augmented generation**. Instead of asking the model to recall fee values from its training data, the application retrieves relevant rows from the local MOH workbook and supplies those rows as evidence.
+RAG means **retrieval-augmented generation**. Instead of asking the model to recall cost values from its training data, the application retrieves relevant rows from local MOH workbooks and supplies those rows as evidence. `feebenchmarks.xlsx` and `hospitalbillsizes.xlsx` are indexed separately; their matches remain separate in workflow state, prompts, and UI tables.
 
 The implementation combines lexical retrieval, optional semantic retrieval, rule-based reranking, and diversity selection.
 
@@ -326,7 +354,7 @@ flowchart TD
 
 ### 6.2 Workbook ingestion
 
-`load_benchmark_records` reads all sheets with:
+`load_benchmark_records` reads all sheets in either workbook with:
 
 - `header=None`, because the sheets do not necessarily share one header position;
 - `dtype=str`, so identifiers and textual values are preserved consistently; and
@@ -471,7 +499,7 @@ reciprocal_rank(rank) = 1 / (60 + rank + 1)
 
 Before a candidate receives a positive custom score, it must match at least one whole anchor token when anchor terms exist. Substrings do not count: for example, `not` cannot match `note`. When the query contains a recognised code, the complete code token must appear in the record text.
 
-For an anchored fee search, General Principles guidance and CCS/ICD mapping records are also kept out of the priced evidence set. Guidance still comes from the separately curated official-source context.
+For an anchored fee search, General Principles guidance and CCS/ICD mapping records are also kept out of the priced evidence set. Guidance still comes from the separately curated official-source context. Hospital bill-size retrieval applies the selected hospital and ward values after ranked candidate retrieval, so the selected abbreviation identifies the final displayed rows.
 
 This gate prevents a row from ranking highly only because it contains generic words such as “fee,” “hospital,” or “procedure.”
 
@@ -540,7 +568,7 @@ This JSON is the evidence supplied to the answer composer and evaluator. The LLM
 
 ### 6.16 Amount extraction and presentation
 
-`estimate_amounts` scans fields whose names contain `lower`, `upper`, `fee`, `bound`, or `cost`. It extracts integers and returns the minimum and maximum values found.
+`estimate_amounts` scans fields whose names contain `lower`, `upper`, `fee`, `bound`, or `cost`. It extracts integers and returns the minimum and maximum values found. Hospital bill-size presentation keeps its named P25/P50/P75 fields rather than reducing them to this chart range.
 
 The UI uses these values for the evidence table and chart. Rows without a usable pair remain visible in the table but are omitted from the chart.
 
@@ -553,16 +581,16 @@ This is a presentation heuristic. If a row contains several different fee compon
 Input:
 
 ```text
-My doctor mentioned a colonoscopy. What should I ask before deciding?
+What is endometriosis, and what care options might a clinician discuss?
 ```
 
 Expected path:
 
 1. Safety check finds no obvious prompt-injection or emergency pattern.
 2. The fixed mode is `Condition to procedures`.
-3. Planner selects the mandatory safety, official-source, and missing-information tools.
-4. Official-source lookup favours MOH medical-help guidance and may also select relevant MOH fee/procedure guidance by token overlap.
-5. The composer produces a non-diagnostic explanation and practical clinician questions.
+3. Planner selects the mandatory safety, MeSH, official-source, and missing-information tools.
+4. MeSH can add terminology support; official-source lookup favours MOH medical-help guidance.
+5. The composer produces a clearly labelled, non-diagnostic condition overview, common symptoms, care options a clinician may discuss, and practical clinician questions.
 6. The evaluator checks for unsupported medical claims or diagnosis language.
 7. The final response includes official-source links and the trace records each stage.
 
@@ -574,21 +602,24 @@ Form values:
 Procedure: colonoscopy
 Care setting: Day surgery / outpatient
 Fee component: Doctor / professional fees
+Hospital: Changi General Hospital (CGH)
+Ward type: Day Surgery Subsidised
 ```
 
 Expected path:
 
 1. The page constructs a complete natural-language query.
 2. The fixed route is `Procedure cost estimate`.
-3. The plan is forced to include `benchmark_search`.
+3. The plan is forced to include `benchmark_search` and, when the hospital bill-size workbook is available, `hospital_bill_search`.
 4. The raw `colonoscopy` field becomes the clinical anchor; structured form labels are excluded from specificity.
 5. BM25 and optional semantic retrieval produce candidates.
 6. Whole-token anchor filtering removes unrelated generic fee, guidance, and mapping rows.
 7. Field, sheet, code, fuzzy, and amount boosts are applied once per record.
 8. MMR selects a varied final set.
-9. The composer can mention only fee values found in these rows.
-10. The evaluator checks that the answer calls them reference ranges rather than a guaranteed price.
-11. The UI presents the answer, workbook evidence, and chart.
+9. Hospital bill-size candidates are filtered to CGH and the selected ward type after ranked retrieval.
+10. The composer can mention only cost values found in the supplied fee-benchmark or stay-cost rows.
+11. The evaluator checks that the answer calls them reference ranges rather than a guaranteed price.
+12. The UI presents the answer, separate workbook evidence tables, and the fee range chart.
 
 ## 8. Provider integration
 
@@ -612,7 +643,7 @@ The app uses several layers rather than relying on one prompt:
 | Input | Character and conversation bounds plus rule-based injection/emergency screening. |
 | Planning | JSON validation, fixed modes, mandatory tools, tool allowlist, safe tool order, deterministic fallback. |
 | Tools | No arbitrary shell, filesystem, database-write, credential, or general-web tool is exposed. |
-| Retrieval | Official URLs come from a local allowlist; fee evidence comes from a local workbook. |
+| Retrieval | Official URLs come from a local allowlist; fee and hospital-stay evidence come from separate local workbooks. |
 | Prompting | User text, conversation, retrieved text, and drafts are marked as untrusted data. |
 | Composition | Explicit grounding, medical-scope, cost-scope, and citation requirements. |
 | Post-processing | Deterministic emergency, follow-up, and source-section insertion. |
@@ -630,11 +661,12 @@ These safeguards reduce risk but do not prove that every response is correct or 
 | Invalid planner JSON | Deterministic fallback plan. |
 | Unknown proposed tool | Tool is discarded by the allowlist. |
 | Embedding/index failure | Semantic retrieval is skipped; BM25 remains available. |
-| No benchmark candidate | The workflow says no matching row was found and asks for more exact wording. |
+| No benchmark candidate | The workflow says no matching fee or stay-cost row was found and asks for more exact wording, hospital, or ward context. |
 | Missing amount fields | Row can appear in the table but not the range chart. |
 | Invalid evaluator JSON | Draft is kept, with deterministic required-section checks still applied. |
 | Provider/runtime exception | The Streamlit page catches it and displays a failed System trace step. |
-| Missing workbook | Fee page stops with a clear error. |
+| Missing fee benchmark workbook | Fee page stops with a clear error. |
+| Missing hospital bill-size workbook | Fee results still work; the stay-cost table is unavailable. |
 
 ## 11. Current limitations
 
@@ -644,7 +676,7 @@ These safeguards reduce risk but do not prove that every response is correct or 
 - The code-pattern regex does not represent every possible medical classification format.
 - Vector scores are normalised generically; different embedding/vector implementations may expose different score semantics.
 - Displayed retrieval scores are internal, unbounded ranking values, not percentages or clinical relevance/confidence.
-- `estimate_amounts` is a general field-name heuristic rather than a schema-specific parser for each workbook sheet.
+- `estimate_amounts` is a general field-name heuristic rather than a schema-specific parser for each fee-benchmark sheet; stay-cost rows retain their source P25/P50/P75/ALOS fields.
 - The evaluator is an LLM-based quality check and can itself make mistakes.
 - The app does not calculate subsidies, insurance payouts, MediSave usage, or patient-specific out-of-pocket cost.
 - The in-memory vector index is rebuilt for a new uncached configuration and is not shared as a persistent database.
@@ -658,6 +690,7 @@ These safeguards reduce risk but do not prove that every response is correct or 
 - planner allowlist enforcement;
 - official-source lookup;
 - retrieval-only tool execution; and
+- hospital and ward filtering for hospital bill-size rows; and
 - evaluator failure followed by one revision.
 
 [`tests/test_streamlit_pages.py`](../tests/test_streamlit_pages.py) verifies:

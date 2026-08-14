@@ -605,7 +605,18 @@ def extract_search_anchor(query: str) -> str:
         flags=re.IGNORECASE,
     )
     if form_match:
-        return clean_text(form_match.group(1))
+        anchor_parts = [clean_text(form_match.group(1))]
+        for label in ("Hospital", "Ward type"):
+            match = re.search(
+                rf"\b{re.escape(label)}\s*:\s*(.+?)(?:\.\s*(?:Ward type|Additional context)\s*:|$)",
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                value = clean_text(match.group(1))
+                if value and not value.lower().startswith("any "):
+                    anchor_parts.append(value)
+        return " ".join(anchor_parts)
     return cleaned
 
 

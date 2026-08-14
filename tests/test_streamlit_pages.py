@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def page_path(relative_path: str) -> str:
+    return str(PROJECT_ROOT / relative_path)
 
 
 class StreamlitPageTests(unittest.TestCase):
@@ -16,12 +24,12 @@ class StreamlitPageTests(unittest.TestCase):
         }
         for path, title in expected_titles.items():
             with self.subTest(path=path):
-                app = AppTest.from_file(path).run(timeout=60)
+                app = AppTest.from_file(page_path(path)).run(timeout=60)
                 self.assertFalse(app.exception)
                 self.assertIn(title, [item.value for item in app.title])
 
     def test_care_pathway_retrieval_only_turn(self) -> None:
-        app = AppTest.from_file("pages/1_Care_Pathway_Guide.py").run(timeout=60)
+        app = AppTest.from_file(page_path("pages/1_Care_Pathway_Guide.py")).run(timeout=60)
         self.assertEqual([toggle.label for toggle in app.toggle], ["Use semantic retrieval"])
         self.assertFalse(app.toggle[0].value)
         app.chat_input[0].set_value(
@@ -32,7 +40,7 @@ class StreamlitPageTests(unittest.TestCase):
         self.assertIn("retrieval-only mode", " ".join(item.value for item in app.markdown))
 
     def test_fee_explorer_retrieval_only_search(self) -> None:
-        app = AppTest.from_file("pages/2_Fee_Benchmark_Explorer.py").run(timeout=60)
+        app = AppTest.from_file(page_path("pages/2_Fee_Benchmark_Explorer.py")).run(timeout=60)
         app.text_input[0].set_value("colonoscopy")
         app.selectbox[0].select("Day surgery / outpatient")
         app.selectbox[1].select("Doctor / professional fees")
@@ -42,7 +50,7 @@ class StreamlitPageTests(unittest.TestCase):
         self.assertIn("Grounded explanation", [item.value for item in app.subheader])
 
     def test_fee_explorer_searches_are_independent(self) -> None:
-        app = AppTest.from_file("pages/2_Fee_Benchmark_Explorer.py").run(timeout=60)
+        app = AppTest.from_file(page_path("pages/2_Fee_Benchmark_Explorer.py")).run(timeout=60)
 
         app.text_input[0].set_value("cataract")
         app.button[0].click().run(timeout=60)
